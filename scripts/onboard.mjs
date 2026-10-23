@@ -44,8 +44,12 @@ try {
   process.exit(1);
 }
 if (!existsSync(path.join(projectRoot, '.comet/config.yaml'))) {
-  console.error('缺 .comet/config.yaml；先用 comet CLI 跑 comet init 完成项目配置。');
-  process.exit(1);
+  // Zero-comet onboarding: write the default project config (schema comet.project.v1,
+  // mirrors `comet init` non-interactive output) instead of asking the user for it.
+  const tpl = readFileSync(path.join(repoRoot, 'assets/comet/config.yaml'), 'utf8');
+  mkdirSync(path.join(projectRoot, '.comet'), { recursive: true });
+  writeFileSync(path.join(projectRoot, '.comet/config.yaml'), tpl);
+  console.log('已生成 .comet/config.yaml（Native 默认配置，可手改）');
 }
 
 // 1. Three-ring asset skeleton (never overwrite existing assets).

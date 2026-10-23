@@ -39,11 +39,8 @@ const git = (...args) => run('git ' + args[0], 'git', args);
 git('init');
 git('-c', 'user.name=keel-selftest', '-c', 'user.email=selftest@keel.local', 'commit', '--allow-empty', '-qm', 'init');
 
-// onboard requires .comet/config.yaml; fixture mirrors comet init output
-// (schema comet.project.v1) without platform picker interactivity.
-mkdirSync(path.join(root, '.comet'), { recursive: true });
-writeFileSync(path.join(root, '.comet/config.yaml'), readFileSync(path.join(fixtures, 'comet-config.yaml')));
-
+// onboard auto-generates .comet/config.yaml from assets/comet/config.yaml
+// (comet init is never invoked directly).
 keel('onboard', CHANGE);
 writeFileSync(path.join(root, 'docs/comet/changes', CHANGE, 'brief.md'), readFileSync(path.join(fixtures, 'brief.md')));
 mkdirSync(path.join(root, 'product/prd'), { recursive: true });
