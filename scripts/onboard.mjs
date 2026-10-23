@@ -108,6 +108,34 @@ if (existsSync(atlasCheckPath)) {
   }
 }
 
+// Untrack Python bytecode: install.sh commits __pycache__/*.pyc, which Python
+// rewrites on first validator runs, drifting the candidate fingerprint gate
+// between verify.checks and verifier (first change after onboard always hits).
+{
+  const gi = path.join(projectRoot, '.gitignore');
+  const cur = existsSync(gi) ? readFileSync(gi, 'utf8') : '';
+  // .atlas/runs/ is atlas runtime state (e.g. last-check-error.log written on
+  // red, deleted on green) — tracking it drifts the fingerprint mid-Run.
+  const add = ['__pycache__/', '*.pyc', '.atlas/runs/'].filter((l) => !cur.split('\n').includes(l));
+  if (add.length > 0) writeFileSync(gi, cur + (cur.endsWith('\n') || cur === '' ? '' : '\n') + add.join('\n') + '\n');
+  const tracked = spawnSync('git', ['-C', projectRoot, 'ls-files', '*.pyc', '.atlas/runs'], { encoding: 'utf8' });
+  const pyc = (tracked.stdout || '').split('\n').filter(Boolean);
+  if (pyc.length > 0) {
+    spawnSync('git', ['-C', projectRoot, 'rm', '--cached', '--quiet', ...pyc], { encoding: 'utf8' });
+    console.log(`已从 git 索引移除 ${pyc.length} 个运行态文件（随下次提交生效，防候选指纹漂移）。`);
+  }
+}
+
+// Burn-in: first validator runs auto-scaffold .trellis/spec/ (testid.md,
+// .gitkeep). If that happens mid-Run it drifts the candidate fingerprint
+// gate, so trigger it now and let the user commit a stable tree.
+if (existsSync(atlasCheckPath)) {
+  const burn = spawnSync('python3', [atlasCheckPath, '--root', projectRoot, '--fast'], { encoding: 'utf8' });
+  const tail = (burn.stdout || '').split('\n').filter((l) => l.trim()).slice(-3).join('\n');
+  console.log('burn-in 首跑（不门禁，greenfield 红属预期）：', tail || '(无输出)');
+  console.log('提示：提交 onboarding 产物（含 .trellis/spec 脚手架）后再 start。');
+}
+
 // 4. Onboarding gate: stack-profile must be valid before any Run starts.
 const gate = spawnSync(
   'python3',

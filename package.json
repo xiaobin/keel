@@ -5,6 +5,7 @@
     "@rpamis/comet": "file:../comet"
   },
   "scripts": {
+    "selftest": "node scripts/selftest.mjs",
     "build:application": "node scripts/build-application.mjs",
     "onboard": "node scripts/onboard.mjs"
   },
