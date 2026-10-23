@@ -101,6 +101,27 @@ function workableAction(root, name, stepIds) {
   return actionsOf(inspect(root, name)).find((a) => ['pending', 'running'].includes(a.status) && stepIds.includes(a.stepId));
 }
 
+const BUILDER_STEPS = ['build.builder', 'supervisor.parent.builder', 'supervisor.child.builder', 'supervisor.child.integration-repair'];
+const VERIFIER_STEPS = ['verify.verifier', 'supervisor.child.verifier'];
+
+// Working tree the action's commit must land in: child worktree for child
+// steps, integration worktree for parent/integration-repair (0006 实证表).
+function workRootOf(action, root) {
+  const act = (action.input && action.input.activation) || {};
+  if (['supervisor.parent.builder', 'supervisor.child.integration-repair'].includes(action.stepId)) return act.integrationWorktree || root;
+  if (['supervisor.child.builder', 'supervisor.child.verifier'].includes(action.stepId)) return act.worktree || root;
+  return root;
+}
+
+function headFiles(workRoot) {
+  const out = execFileSync('git', ['-C', workRoot, 'diff-tree', '--no-commit-id', '--name-only', '-r', '--diff-filter=AM', 'HEAD'], { encoding: 'utf8' }).trim();
+  return out ? out.split('\n').filter((f) => f && !f.endsWith('comet-state.yaml')) : [];
+}
+
+function noopCheck(id, name) {
+  return { id, name, executable: process.execPath, argv: ['-e', 'process.exit(0)'], cwdRef: '.', timeoutMs: 10000, repeatable: true };
+}
+
 function gitHead(root) {
   return execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 }
@@ -194,12 +215,12 @@ const commands = {
         console.log('扩展 verdict：', out && out.value && out.value.verdict, '|', ((out && out.value && out.value.summary) || '').slice(0, 200));
         continue;
       }
-      if (['build.builder', 'supervisor.parent.builder'].includes(pending.stepId)) {
+      if (BUILDER_STEPS.includes(pending.stepId)) {
         console.log(`${pending.id} ${pending.stepId} 等待 Builder 交接 → keel build ${name} --payload <file.json>`);
         return;
       }
-      if (pending.stepId === 'verify.verifier') {
-        console.log(`${pending.id} verify.verifier 等待独立验收 → keel verify ${name} --payload <file.json>`);
+      if (VERIFIER_STEPS.includes(pending.stepId)) {
+        console.log(`${pending.id} ${pending.stepId} 等待独立验收 → keel verify ${name} --payload <file.json>`);
         return;
       }
       console.log(`推进 ${pending.id} ${pending.stepId}`);
@@ -215,16 +236,23 @@ const commands = {
     if (!payload) {
       const summary = opt('summary') || fail('keel build 需要 --payload <file.json> 或 --summary <说明>（自动采集模式）');
       const st = stateOf(inspect(root, name));
-      const rawAcc = st.acceptance || [];
+      const actAcc = ((pendingAction(root, name)?.input || {}).activation || {}).acceptance;
+      const rawAcc = (Array.isArray(actAcc) && actAcc.length > 0 ? actAcc : st.acceptance) || [];
       const acc = Array.isArray(rawAcc) ? rawAcc.map((a) => a.id) : Object.keys(rawAcc);
       if (acc.length === 0) fail('run 状态里没有验收项，无法自动采集；请用 --payload 显式交接。');
       // Evidence = deliverable files currently in the change dir. git HEAD is
       // the wrong source: the commit may sweep in unrelated churn and deletions
       // (proven: archive moves of a previous change broke test -s checks).
+      const sup = ['supervisor.parent.builder', 'supervisor.child.builder'].includes(pendingAction(root, name)?.stepId);
       const changeDir = path.join(root, 'docs/comet/changes', name);
-      const changed = existsSync(changeDir)
-        ? readdirSync(changeDir).filter((f) => f !== 'comet-state.yaml').map((f) => 'docs/comet/changes/' + name + '/' + f)
-        : [];
+      // Supervisor children work in their own worktree/branch: the change dir
+      // is not the deliverable there. Evidence = files of the worktree HEAD
+      // commit instead (added/modified only).
+      const changed = sup
+        ? headFiles(workRootOf(pendingAction(root, name), root))
+        : existsSync(changeDir)
+          ? readdirSync(changeDir).filter((f) => f !== 'comet-state.yaml').map((f) => 'docs/comet/changes/' + name + '/' + f)
+          : [];
       const evidence = changed.length > 0 ? changed : ['git HEAD ' + gitHead(root)];
       payload = {
         summary,
@@ -233,12 +261,26 @@ const commands = {
         knownLimits: ['验收证据为 HEAD 变更文件全集，非逐条针对性证据；需要精确对账请用 --payload。'],
         verificationChecks: changed.map((f) => ({ id: 'exists-' + f.replace(/[^a-zA-Z0-9]/g, '-'), name: 'exists:' + f, executable: 'test', argv: ['-s', f], cwdRef: '.', timeoutMs: 10000, repeatable: true })),
       };
-      if (existsSync(path.join(root, 'product/prd/prd.md'))) {
+      if (!sup && existsSync(path.join(root, 'product/prd/prd.md'))) {
         payload.verificationChecks.push({ id: 'prd-green', name: 'prd-green', executable: 'python3', argv: ['.atlas/validators/validate_prd.py', '--root', '.'], cwdRef: '.', timeoutMs: 60000, repeatable: true });
       }
     }
-    const pending = workableAction(root, name, ['build.builder', 'supervisor.parent.builder']);
+    const pending = workableAction(root, name, BUILDER_STEPS);
     if (!pending) fail('当前没有待交接的 Builder Action；keel status 确认状态。');
+    const workRoot = workRootOf(pending, root);
+    // Integration repair has its own output shape (integrationCommit, not
+    // candidateCommit); everything else shares the Builder payload.
+    if (pending.stepId === 'supervisor.child.integration-repair') {
+      if (!payload) payload = { summary: opt('summary') || fail('integration-repair 需要 --payload 或 --summary') };
+      const output = {
+        summary: payload.summary,
+        integrationCommit: gitHead(workRoot),
+        integrationChecks: payload.integrationChecks || [noopCheck('integration-auto', 'integration auto')],
+      };
+      claimAndRecord(root, name, pending, 'builder', output, 'integration-repair');
+      console.log('integration-repair 交接成功（worktree=' + workRoot + '）。→ keel next', name);
+      return;
+    }
     // Protocol guards (0005 §3.4): evidence must be non-empty per row.
     for (const row of payload.acceptanceReview || []) {
       if (!Array.isArray(row.evidence) || row.evidence.length === 0) {
@@ -247,7 +289,7 @@ const commands = {
     }
     const output = {
       summary: payload.summary,
-      candidateCommit: gitHead(root),
+      candidateCommit: gitHead(workRoot),
       addressedAcceptanceIds: (payload.acceptanceReview || []).map((r) => r.id),
       acceptanceReview: payload.acceptanceReview,
       checks: payload.checks || [],
@@ -261,8 +303,39 @@ const commands = {
 
   verify(root) {
     const payload = readPayload(opt('payload') || fail('keel verify 需要 --payload <file.json>'));
-    const pending = workableAction(root, name, ['verify.verifier']);
+    const pending = workableAction(root, name, VERIFIER_STEPS);
     if (!pending) fail('当前没有待验收的 Verifier Action；keel status 确认状态。');
+    // Child Verifier has a flat shape (verdict + integrationChecks + evidence),
+    // not the candidate response.final-result envelope.
+    if (pending.stepId === 'supervisor.child.verifier') {
+      const activation = (pending.input || {}).activation || {};
+      const child = activation.child || '?';
+      // evidence.checks must equal the executed child.checks IDs, or the runtime
+      // rejects with "check evidence is not current"
+      // (native-sdk-supervisor-child.ts:133-139). Auto-collect from the bound
+      // checkActionId outcome when the payload omits them.
+      let checkIds = payload.checks;
+      if (!checkIds && typeof activation.checkActionId === 'string') {
+        const acts = ((inspect(root, name).data || {}).actions) || [];
+        const chk = acts.find((a) => a.actionId === activation.checkActionId);
+        checkIds = (((chk || {}).outcome || {}).output || {}).checks
+          ? chk.outcome.output.checks.map((c) => c.id || c.name).filter(Boolean)
+          : [];
+      }
+      const output = {
+        candidateCommit: gitHead(workRootOf(pending, root)),
+        verdict: payload.verdict,
+        integrationChecks: payload.integrationChecks || [noopCheck(child + '-integration', child + ' integration check')],
+        evidence: {
+          summary: payload.summary,
+          checks: checkIds || [],
+          acceptance: payload.acceptance || [],
+        },
+      };
+      claimAndRecord(root, name, pending, 'verifier', output, 'child-verifier');
+      console.log('子任务 Verifier 裁决已记录：', payload.verdict, '（child=' + child + '）。→ keel next', name);
+      return;
+    }
     const next = dispatch(root, { operation: 'next', runId: name }, 'next-verifier');
     const runner = ((next.agent || {}).continuation || {}).runnerAction || {};
     const handoff = stateOf(inspect(root, name)).builder_handoff || {};
@@ -270,21 +343,31 @@ const commands = {
     if (!candidateId) fail('取不到当前 candidateId；keel status 确认状态。');
     // Independent session: sessionId must differ from the builder ref and be
     // echoed as verifierExecutionRef (0005 §3.6).
-    const output = {
-      candidateId,
-      response: {
-        kind: 'final-result',
-        result: {
-          acceptance: payload.acceptance,
-          attempt: runner.attempt || 1,
-          iteration: runner.iteration || 1,
-          risks: payload.risks || [],
-          summary: payload.summary,
-          verdict: payload.verdict,
-        },
-      },
-      verifierExecutionRef: 'verifier',
-    };
+    // refreshChecks path (native-sdk-checks.ts:257): on check-input drift the
+    // Verifier re-requests the original plans with refreshChecks:true; Runtime
+    // reruns them against a fresh observation before a new Verifier round.
+    const output = payload.refreshChecks === true
+      ? {
+          candidateId,
+          refreshChecks: true,
+          response: { kind: 'request-checks', checks: payload.checks || [] },
+          verifierExecutionRef: 'verifier',
+        }
+      : {
+          candidateId,
+          response: {
+            kind: 'final-result',
+            result: {
+              acceptance: payload.acceptance,
+              attempt: runner.attempt || 1,
+              iteration: runner.iteration || 1,
+              risks: payload.risks || [],
+              summary: payload.summary,
+              verdict: payload.verdict,
+            },
+          },
+          verifierExecutionRef: 'verifier',
+        };
     claimAndRecord(root, name, pending, 'verifier', output, 'verifier');
     console.log('Verifier 裁决已记录：', payload.verdict, '。→ keel next', name);
   },
@@ -294,16 +377,21 @@ const commands = {
   // continuation-issued proposal hash and guards.
   confirm(root) {
     const summary = opt('summary') || fail('keel confirm 需要 --summary <确认说明>');
+    const extra0 = [];
     const st = nativeNext(root, name, ['--summary', summary], 'confirm-record');
     const cont = (st.agent || {}).continuation || {};
     const alts = cont.commandAlternatives || [];
-    const alt = alts.find((x) => x.name === 'confirm-shape') || alts.find((x) => x.name === 'accept-result');
+    const alt = alts.find((x) => x.name === 'confirm-shape') || alts.find((x) => x.name === 'accept-result')
+      || alts.find((x) => x.name === 'multi-session') || alts.find((x) => x.name === 'single-session');
+    // Supervisor shape confirm: the alternative IS the coordination mode.
+    const coord = opt('coordination-mode') || (alt && ['multi-session', 'single-session'].includes(alt.name) ? alt.name : null);
+    if (coord) extra0.push('--coordination-mode', coord);
     if (!alt) {
       const c = alts.map((x) => x.name).join(', ') || '无';
       fail(`当前没有可确认的等待（可选：${c}）。disp=${cont.disposition} action=${cont.action}`);
     }
-    const extra = ['--summary', summary];
-    if (alt.name === 'confirm-shape') extra.push('--confirmed');
+    const extra = ['--summary', summary, ...extra0];
+    if (alt.name !== 'accept-result') extra.push('--confirmed');
     if (alt.name === 'accept-result') {
       extra.push('--accept-result');
       const h = (alt.commandArgs || []);
@@ -333,7 +421,7 @@ if (!cmd || cmd === 'help' || cmd === '--help') {
   keel next <change>      推进 Runtime 可自行的部分（检查/扩展/报告）
   keel build <change> --payload <f.json>   Builder 交接（payload 只含业务字段）
   keel verify <change> --payload <f.json>  独立 Verifier 裁决
-  keel confirm <change> --summary <说明>   确认当前等待（Shape/验收）
+  keel confirm <change> --summary <说明> [--coordination-mode multi-session|single-session]  确认当前等待（Shape/验收；Supervisor 分流需 coordination-mode）
   keel archive <change>   归档
 
 通用：--project-root <p>（默认 cwd，必须物理路径）；COMET_BIN 指定 comet 仓内构建。
