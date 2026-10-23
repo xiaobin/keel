@@ -1,0 +1,198 @@
+{
+  "schema": "comet.workflow.application.v1",
+  "id": "keel",
+  "version": "1",
+  "base": "native",
+  "runtimeVersion": "0.5.0",
+  "entrySkill": "SKILL.md",
+  "module": "application.mjs",
+  "skills": [
+    {
+      "id": "governance-suite",
+      "root": "governance-suite",
+      "contentHash": "81043efb09524db65079343cd575f906c44297b0d782dae38484b4ef4b20aea4",
+      "adapter": {
+        "kind": "check",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "activation"
+          ],
+          "properties": {
+            "activation": {
+              "type": "object",
+              "required": [
+                "reviewSource",
+                "workspaceRoot",
+                "artifactRefs"
+              ],
+              "properties": {
+                "reviewSource": {
+                  "type": "object"
+                },
+                "workspaceRoot": {
+                  "type": "string"
+                },
+                "artifactRefs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "outputSchema": {
+          "type": "object",
+          "required": [
+            "verdict",
+            "bindingHash",
+            "artifactHashes",
+            "summary"
+          ],
+          "properties": {
+            "verdict": {
+              "enum": [
+                "pass",
+                "fail",
+                "revise-requirements"
+              ]
+            },
+            "bindingHash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "artifactHashes": {
+              "type": "object",
+              "properties": {
+                "product/stack-profile.yaml": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              },
+              "additionalProperties": false
+            },
+            "summary": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "scope": [
+          "product/stack-profile.yaml"
+        ],
+        "requiredCapabilities": [
+          "skill-script"
+        ],
+        "interaction": "none",
+        "sideEffect": "read",
+        "controlsApproval": false,
+        "completion": "machine-check",
+        "failure": "repair",
+        "recovery": "manual",
+        "review": {
+          "status": "accepted",
+          "reviewedBy": "keel-source-review",
+          "contentHash": "81043efb09524db65079343cd575f906c44297b0d782dae38484b4ef4b20aea4",
+          "capabilities": [
+            {
+              "id": "governance-suite",
+              "file": "SKILL.md",
+              "excerpt": "[门禁编排脚本](scripts/check.mjs)"
+            }
+          ],
+          "effects": [
+            {
+              "file": "SKILL.md",
+              "excerpt": "禁止发布、归档或自行批准。"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "builder-guidance",
+      "root": "builder-guidance",
+      "contentHash": "5e096d78dd6f9d564078823e6ba66af0ac454194f5b1ab38e791ce5c5f2fedd2",
+      "adapter": {
+        "kind": "guidance",
+        "inputSchema": {},
+        "outputSchema": {},
+        "scope": [
+          "product/stack-profile.yaml"
+        ],
+        "requiredCapabilities": [],
+        "interaction": "none",
+        "sideEffect": "read",
+        "controlsApproval": false,
+        "completion": "self-report",
+        "failure": "stop",
+        "recovery": "manual",
+        "review": {
+          "status": "accepted",
+          "reviewedBy": "keel-source-review",
+          "contentHash": "5e096d78dd6f9d564078823e6ba66af0ac454194f5b1ab38e791ce5c5f2fedd2",
+          "capabilities": [
+            {
+              "id": "builder-guidance",
+              "file": "SKILL.md",
+              "excerpt": "资产前置：行为变化同步更新对应 PRD/AC/E2E"
+            }
+          ],
+          "effects": [
+            {
+              "file": "SKILL.md",
+              "excerpt": "这是只读执行指导。"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "bindings": [
+    {
+      "workflowId": "comet-native",
+      "stepId": "native.extension.candidate.governance-suite",
+      "skillId": "governance-suite",
+      "capability": "governance-suite",
+      "usage": "action"
+    },
+    {
+      "workflowId": "comet-native",
+      "stepId": "native.extension.parent.governance-suite",
+      "skillId": "governance-suite",
+      "capability": "governance-suite",
+      "usage": "action"
+    },
+    {
+      "workflowId": "comet-native",
+      "stepId": "build.builder",
+      "skillId": "builder-guidance",
+      "capability": "builder-guidance",
+      "usage": "guidance"
+    },
+    {
+      "workflowId": "comet-native",
+      "stepId": "supervisor.parent.builder",
+      "skillId": "builder-guidance",
+      "capability": "builder-guidance",
+      "usage": "guidance"
+    },
+    {
+      "workflowId": "comet-native",
+      "stepId": "supervisor.child.builder",
+      "skillId": "builder-guidance",
+      "capability": "builder-guidance",
+      "usage": "guidance"
+    },
+    {
+      "workflowId": "comet-native",
+      "stepId": "supervisor.child.integration-repair",
+      "skillId": "builder-guidance",
+      "capability": "builder-guidance",
+      "usage": "guidance"
+    }
+  ]
+}

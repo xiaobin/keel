@@ -1,5 +1,4 @@
+.comet/
+.pi/
+.write-review/
 node_modules/
-.DS_Store
-dist/
-coverage/
-*.log

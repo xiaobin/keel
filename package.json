@@ -1,6 +1,13 @@
 {
   "name": "keel",
   "version": "0.1.0",
+  "dependencies": {
+    "@rpamis/comet": "file:../comet"
+  },
+  "scripts": {
+    "build:application": "node scripts/build-application.mjs",
+    "onboard": "node scripts/onboard.mjs"
+  },
   "description": "Project Harness workflow for the full AI-coding lifecycle — Comet Native runtime × Atlas governance",
   "license": "MIT",
   "type": "module",
