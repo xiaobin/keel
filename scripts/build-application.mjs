@@ -54,7 +54,7 @@ function runtimeVersion() {
   throw new Error('comet version unknown: set COMET_VERSION or keep a sibling ../comet checkout');
 }
 
-const skills = ['governance-suite', 'builder-guidance'].map((id) => ({
+const skills = ['governance-suite', 'independent-review', 'builder-guidance'].map((id) => ({
   id,
   root: id,
   contentHash: skillContentHash(path.join(pkgRoot, id)),
@@ -88,6 +88,21 @@ const governanceOutput = {
         'product/stack-profile.yaml': { type: 'string', pattern: '^[a-f0-9]{64}$' },
       },
       additionalProperties: false,
+    },
+    summary: { type: 'string', minLength: 1 },
+  },
+  additionalProperties: false,
+};
+
+const reviewOutput = {
+  type: 'object',
+  required: ['verdict', 'bindingHash', 'artifactHashes', 'summary'],
+  properties: {
+    verdict: { enum: ['pass', 'fail', 'revise-requirements'] },
+    bindingHash: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+    artifactHashes: {
+      type: 'object',
+      additionalProperties: { type: 'string', pattern: '^[a-f0-9]{64}$' },
     },
     summary: { type: 'string', minLength: 1 },
   },
@@ -131,6 +146,33 @@ const manifest = {
       },
     },
     {
+      id: 'independent-review',
+      root: 'independent-review',
+      contentHash: hashOf('independent-review'),
+      adapter: {
+        kind: 'check',
+        inputSchema: activationInput,
+        outputSchema: reviewOutput,
+        scope: ['product/reviews'],
+        requiredCapabilities: ['skill-script'],
+        interaction: 'none',
+        sideEffect: 'read',
+        controlsApproval: false,
+        completion: 'machine-check',
+        failure: 'repair',
+        recovery: 'manual',
+        review: {
+          status: 'accepted',
+          reviewedBy: 'keel-source-review',
+          contentHash: hashOf('independent-review'),
+          capabilities: [
+            { id: 'independent-review', file: 'SKILL.md', excerpt: '[门禁编排脚本](scripts/check.mjs)' },
+          ],
+          effects: [{ file: 'SKILL.md', excerpt: '禁止发布、归档或自行批准。' }],
+        },
+      },
+    },
+    {
       id: 'builder-guidance',
       root: 'builder-guidance',
       contentHash: hashOf('builder-guidance'),
@@ -166,6 +208,13 @@ const manifest = {
       capability: 'governance-suite',
       usage: 'action',
     })),
+    {
+      workflowId: 'comet-native',
+      stepId: 'native.extension.candidate.independent-review',
+      skillId: 'independent-review',
+      capability: 'independent-review',
+      usage: 'action',
+    },
     ...[
       'build.builder',
       'supervisor.parent.builder',

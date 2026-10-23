@@ -55,6 +55,15 @@ keel('start', CHANGE);
 keel('confirm', CHANGE, '--summary', '自验确认范围');
 
 writeFileSync(path.join(root, 'docs/comet/changes', CHANGE, 'candidate.md'), '# selftest 交付\n\n自验流程记录。\n');
+// independent-review gate: exactly one review dir with review.json + README.md,
+// committed with the candidate so the candidate fingerprint stays stable.
+const reviewDir = path.join(root, 'product/reviews');
+mkdirSync(reviewDir, { recursive: true });
+writeFileSync(path.join(reviewDir, 'review.json'), JSON.stringify({
+  ok: true, status: 'PASS', root: '.', scope: CHANGE, unit: 'selftest',
+  round: 1, expected: 1, reviewed: 1, checks: [], other: [],
+}, null, 1) + '\n');
+writeFileSync(path.join(reviewDir, 'README.md'), '# 实例⑤审查留痕\n\n自验审查：PASS，应审 1 / 实审 1。\n');
 git('add', '-A');
 git('-c', 'user.name=keel-selftest', '-c', 'user.email=selftest@keel.local', 'commit', '-qm', 'candidate');
 

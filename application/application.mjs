@@ -14,9 +14,26 @@ export function createApplication(context) {
     try {
       return JSON.parse(raw);
     } catch {
-      throw new Error(`governance-suite 输出不是合法 JSON：${raw.slice(0, 200)}`);
+      throw new Error(`${path.basename(skill.root)} 输出不是合法 JSON：${raw.slice(0, 200)}`);
     }
   };
+  const governanceExtension = (id, scopes, artifactRefs) => ({
+    id,
+    skillId: id,
+    scopes,
+    artifactRefs,
+    validator: {
+      id: `atlas-${id}`,
+      version: '1',
+      validate: ({ action, outcome }) => {
+        const actual = inspect(context.skills.get(id), action);
+        return {
+          accepted: hashRuntimeValue(actual) === hashRuntimeValue(outcome.output),
+          reason: '回报与实际门禁编排结果不符',
+        };
+      },
+    },
+  });
   const host = context.createSkillExecutor({
     id: 'keel-governance-script',
     capabilities: ['skill-script'],
@@ -26,23 +43,9 @@ export function createApplication(context) {
   return createNativeWorkflowApplication(context, {
     executors: [host],
     extensions: [
-      {
-        id: 'governance-suite',
-        skillId: 'governance-suite',
-        scopes: ['candidate', 'parent'],
-        artifactRefs: ['product/stack-profile.yaml'],
-        validator: {
-          id: 'atlas-governance-suite',
-          version: '1',
-          validate: ({ action, outcome }) => {
-            const actual = inspect(context.skills.get('governance-suite'), action);
-            return {
-              accepted: hashRuntimeValue(actual) === hashRuntimeValue(outcome.output),
-              reason: '回报与实际门禁编排结果不符',
-            };
-          },
-        },
-      },
+      // Machine-check gate: rerun the skill's check script and compare canonical hashes.
+      governanceExtension('governance-suite', ['candidate', 'parent'], ['product/stack-profile.yaml']),
+      governanceExtension('independent-review', ['candidate'], ['product/reviews/review.json']),
     ],
   });
 }

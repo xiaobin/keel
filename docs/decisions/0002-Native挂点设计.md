@@ -174,3 +174,24 @@ Archive  （Supervisor：supervisor.parent.deliver）→ archive.prepare → arc
 2. 三环资产在用户项目的最终落位：沿用 atlas 路径约定（`product/` 等，Python 校验器零改动）还是 keel 自有目录（需验证校验器路径可配置性）。倾向前者，实现期验证后定。
 3. 实例⑤审查与 comet 独立 Verifier 的职责切分细则（两者都查候选时的分工与去重）。
 4. E2E 评审台（atlas 控制台/台账）是否随 Keel 下沉，或首版只保机器门。
+
+## 9. 任务9 实证补记：independent-review 扩展落地（2026-10-23）
+
+§5 扩展声明草案中的 `independent-review` 已实现并接入候选链位，自验全链
+（onboard→…→archive/done）通过。实现期发现三条 comet 扩展协议硬约束，设计文档据此修订：
+
+1. **`artifactRefs` 必须非空且每项是真实文件**（native-application.ts:197-201 校验，空数组
+   直接拒「Native 扩展身份、范围或工件无效」；目录路径在执行时报「Native extension artifact
+   must be a real file」）。动态工件（审查报告）不能用目录引用兜——keel 契约因此定为
+   **固定单文件 `product/reviews/review.json` + `README.md`**，每个变更覆盖，历史走 git。
+2. **Outcome `artifactHashes` 必须与运行时按 `artifactRefs` 现算的哈希精确相等**
+   （native-application.ts:301-303，`hashRuntimeValue` 比对，多一个键即「扩展工件变化或缺少
+   真实摘要」OUTCOME_REJECTED）。审查脚本只报 `review.json` 一个键；README 的在册约束
+   仍由 atlas validate_review_report（双份留痕判据）强制执行，不进哈希表。
+3. **同 scope 多扩展按声明顺序串链**：候选链位实测 `verify.checks → governance-suite
+   （:6）→ independent-review（:7）→ verify.verifier（:8）`，扩展数组顺序即执行顺序。
+
+审查报告落盘门语义沿用 atlas：报告不存在=未审（fail-closed），Critical/应审实审对账不过
+⇒ fail verdict 回 Builder；WARN（Major 或 M<N）不置红但全行进 summary 供 Verifier 核对。
+§8 未决问题 3（实例⑤与 Verifier 分工）维持现状：实例⑤管审查报告形态与对账（机器判），
+Verifier 管验收语义裁决，两者不重叠。
