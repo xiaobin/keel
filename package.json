@@ -1,0 +1,11 @@
+{
+  "name": "keel",
+  "version": "0.1.0",
+  "description": "Project Harness workflow for the full AI-coding lifecycle — Comet Native runtime × Atlas governance",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22.16"
+  }
+}
