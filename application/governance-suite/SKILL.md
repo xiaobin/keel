@@ -6,7 +6,7 @@ description: 在已领取的 Native 候选治理 Action 中跑 atlas_check 门�
 # Atlas 门禁编排
 
 读取当前 Action 的固定输入，只在 activation.workspaceRoot 指向的真实工作区执行
-[门禁编排脚本](scripts/check.mjs)。脚本调用项目内 `.atlas/scripts/atlas_check.py --fast --json`（atlas 经 install.sh 装配进被治理项目）
+[门禁编排脚本](scripts/check.mjs)。脚本调用项目内 `.atlas/scripts/atlas_check.py --fast --json`（atlas 载荷由 keel onboard 从 vendor/atlas 装配进被治理项目）
 （Python 校验器外部调用，不重写；E2E 真跑门由后续 e2e-live 扩展承担）。
 
 - atlas_check 绿 → verdict pass；红或无法执行 → verdict fail（fail-closed，不可用不豁免）。

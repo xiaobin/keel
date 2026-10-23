@@ -48,7 +48,7 @@ const artifactHashes = existsSync(profilePath)
   : {};
 
 // The orchestrator resolves validators under <root>/.atlas (atlas assembles INTO the
-// governed project via install.sh); keel onboard is what runs that assembly.
+// governed project by keel onboard copying vendor/atlas (see docs/decisions/0010).
 const atlasCheck = path.join(activation.workspaceRoot, '.atlas/scripts/atlas_check.py');
 if (!existsSync(profilePath)) {
   out('fail', artifactHashes, '未完成开户：缺 product/stack-profile.yaml（先跑 keel onboard）。');

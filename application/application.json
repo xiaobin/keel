@@ -10,7 +10,7 @@
     {
       "id": "governance-suite",
       "root": "governance-suite",
-      "contentHash": "81043efb09524db65079343cd575f906c44297b0d782dae38484b4ef4b20aea4",
+      "contentHash": "45c0da62296fee96668607258f019da3a0b052c817b82641b00a9fded095e6a2",
       "adapter": {
         "kind": "check",
         "inputSchema": {
@@ -95,7 +95,7 @@
         "review": {
           "status": "accepted",
           "reviewedBy": "keel-source-review",
-          "contentHash": "81043efb09524db65079343cd575f906c44297b0d782dae38484b4ef4b20aea4",
+          "contentHash": "45c0da62296fee96668607258f019da3a0b052c817b82641b00a9fded095e6a2",
           "capabilities": [
             {
               "id": "governance-suite",
@@ -217,7 +217,7 @@
     {
       "id": "closeout",
       "root": "closeout",
-      "contentHash": "e42b3567bc9ff3ca6a689faaa927ff988543b5e8c41d5919a050a8ec5fab0daa",
+      "contentHash": "e71b9220568203be9d893e7039c56d0ff5e2c673087083536da74a6a85954985",
       "adapter": {
         "kind": "check",
         "inputSchema": {
@@ -302,7 +302,7 @@
         "review": {
           "status": "accepted",
           "reviewedBy": "keel-source-review",
-          "contentHash": "e42b3567bc9ff3ca6a689faaa927ff988543b5e8c41d5919a050a8ec5fab0daa",
+          "contentHash": "e71b9220568203be9d893e7039c56d0ff5e2c673087083536da74a6a85954985",
           "capabilities": [
             {
               "id": "closeout",

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, cpSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +13,7 @@ function arg(name, required = true) {
   const i = process.argv.indexOf(`--${name}`);
   const v = i >= 0 ? process.argv[i + 1] : undefined;
   if (required && (!v || v.startsWith('--'))) {
-    console.error(`usage: node scripts/onboard.mjs --project-root <项目> --name <change> [--atlas-root <atlas 检出>]`);
+    console.error(`usage: node scripts/onboard.mjs --project-root <项目> --name <change>`);
     process.exit(2);
   }
   return v;
@@ -25,12 +25,11 @@ if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(name)) {
   console.error(`change 名非法：${name}（须 ^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$）`);
   process.exit(2);
 }
-const atlasRoot =
-  arg('atlas-root', false) ||
-  process.env.KEEL_ATLAS_ROOT ||
-  path.resolve(repoRoot, '../atlas');
-if (!existsSync(path.join(atlasRoot, 'install.sh'))) {
-  console.error(`找不到 Atlas 检出：${atlasRoot}（用 --atlas-root 或 KEEL_ATLAS_ROOT 指定）。`);
+// Atlas runtime payload is vendored in-repo (vendor/atlas, see docs/decisions/0010);
+// keel has no dependency on an external atlas checkout.
+const vendorAtlas = path.join(repoRoot, 'vendor/atlas');
+if (!existsSync(path.join(vendorAtlas, 'scripts/atlas_check.py'))) {
+  console.error(`keel 内置 atlas 载荷缺失：${vendorAtlas}（仓库不完整）。`);
   process.exit(1);
 }
 
@@ -89,30 +88,37 @@ if (!existsSync(brief)) {
   console.log(`已写 brief 骨架 ${brief}`);
 }
 
-// 3. Assemble .atlas/ via atlas's own installer (never overwrites product/).
-// Already assembled = skip (install.sh refuses to overwrite an existing .atlas,
-// and re-assembling would roll back any local validator changes).
+// 3. Assemble .atlas/ by copying the vendored payload (never overwrites product/).
+// Already assembled = skip (re-assembling would roll back any local validator changes).
+// Mirrors atlas install.sh --no-patch --no-wiring: the .trellis mount, AGENTS.md
+// wiring and skill stubs do not apply — keel replaces that entry with the comet workflow.
 const atlasCheckPath = path.join(projectRoot, '.atlas/scripts/atlas_check.py');
 if (existsSync(atlasCheckPath)) {
-  console.log('.atlas 已装配，跳过 install.sh。');
+  console.log('.atlas 已装配，跳过载荷复制。');
 } else {
-  // --no-patch/--no-wiring: keel replaces the trellis/atlas-apply entry with the comet
-  // workflow, so the .trellis mount and AGENTS.md wiring do not apply.
-  const install = spawnSync(
-    'bash',
-    // --force: keel projects have no .trellis (comet replaces it); bypass the trellis-presence guard.
-    [path.join(atlasRoot, 'install.sh'), '--target', projectRoot, '--no-patch', '--no-wiring', '--force'],
+  const dest = path.join(projectRoot, '.atlas');
+  cpSync(vendorAtlas, dest, { recursive: true });
+  // Assembly version stamp (same pkg_digest.stamp_file as install.sh): atlas_check's
+  // 装配版本 row reconciles .atlas/VERSION against the source package digest.
+  const stamp = spawnSync(
+    'python3',
+    [
+      '-c',
+      'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from pkg_digest import stamp_file; print(stamp_file(Path(sys.argv[2]), Path(sys.argv[3])))',
+      path.join(vendorAtlas, 'scripts'),
+      vendorAtlas,
+      path.join(dest, 'VERSION'),
+    ],
     { encoding: 'utf8' },
   );
-  process.stdout.write(install.stdout || '');
-  process.stderr.write(install.stderr || '');
-  if (install.error || install.status !== 0) {
-    console.error('atlas 装配失败（install.sh）；开户中止。');
+  if (stamp.error || stamp.status !== 0) {
+    console.error('atlas 载荷版本戳落盘失败：', (stamp.stderr || '').trim() || stamp.error?.message);
     process.exit(1);
   }
+  console.log('已装配 .atlas/（keel 内置载荷，VERSION 戳已落盘）。');
 }
 
-// Untrack Python bytecode: install.sh commits __pycache__/*.pyc, which Python
+// Untrack Python bytecode: Python writes __pycache__/*.pyc on validator runs,
 // rewrites on first validator runs, drifting the candidate fingerprint gate
 // between verify.checks and verifier (first change after onboard always hits).
 {
@@ -143,7 +149,8 @@ if (existsSync(atlasCheckPath)) {
 // 4. Onboarding gate: stack-profile must be valid before any Run starts.
 const gate = spawnSync(
   'python3',
-  [path.join(atlasRoot, 'validators/validate_stack_profile.py'), '--root', projectRoot],
+  // Run the gate from the assembled project copy (also proves the payload works).
+  [path.join(projectRoot, '.atlas/validators/validate_stack_profile.py'), '--root', projectRoot],
   { encoding: 'utf8' },
 );
 process.stdout.write(gate.stdout || '');
