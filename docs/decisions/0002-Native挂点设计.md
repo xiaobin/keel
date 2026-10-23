@@ -195,3 +195,17 @@ Archive  （Supervisor：supervisor.parent.deliver）→ archive.prepare → arc
 ⇒ fail verdict 回 Builder；WARN（Major 或 M<N）不置红但全行进 summary 供 Verifier 核对。
 §8 未决问题 3（实例⑤与 Verifier 分工）维持现状：实例⑤管审查报告形态与对账（机器判），
 Verifier 管验收语义裁决，两者不重叠。
+
+## 10. 任务10 实证补记：closeout 扩展落地（2026-10-23）
+
+§5 的 `closeout` 已实现并接入链位，selftest 全链绿。两处对原设计的修正，均有实证：
+
+1. **修正 §7.3「closeout 须把 SKIP 视为阻断」**：实测零域项目的 8 行 SKIP 全部是
+   「前置未声明（未就绪，非失败）」的合法未就绪态（无 .trellis/spec、无 e2e-index、无 ADR 等
+   ——校验器按资产在否自我裁量），不存在「应做而 SKIP」的行。阻断 SKIP = greenfield 永远无法
+   收口。closeout 的真正收口增量改为：**不带 `--fast` 跑 atlas_check 全量**（出厂测试与
+   E2E 真跑不跳过，实测 22.8s vs fast ~2s，exit 0）。SKIP 维持全量进 summary。
+2. **链位**：`['candidate','parent']` 与 governance-suite 同（parent 链只在 Supervisor
+   多子任务流出现）；同 scope 串链顺序 = 声明顺序，实测
+   `governance-suite(fast) → independent-review → closeout(full) → verify.verifier`。
+   A10 impact 对账未下沉：keel 流暂无「预测集」产物，待有预测载体再议。

@@ -215,6 +215,111 @@
       }
     },
     {
+      "id": "closeout",
+      "root": "closeout",
+      "contentHash": "e42b3567bc9ff3ca6a689faaa927ff988543b5e8c41d5919a050a8ec5fab0daa",
+      "adapter": {
+        "kind": "check",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "activation"
+          ],
+          "properties": {
+            "activation": {
+              "type": "object",
+              "required": [
+                "reviewSource",
+                "workspaceRoot",
+                "artifactRefs"
+              ],
+              "properties": {
+                "reviewSource": {
+                  "type": "object"
+                },
+                "workspaceRoot": {
+                  "type": "string"
+                },
+                "artifactRefs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "outputSchema": {
+          "type": "object",
+          "required": [
+            "verdict",
+            "bindingHash",
+            "artifactHashes",
+            "summary"
+          ],
+          "properties": {
+            "verdict": {
+              "enum": [
+                "pass",
+                "fail",
+                "revise-requirements"
+              ]
+            },
+            "bindingHash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "artifactHashes": {
+              "type": "object",
+              "properties": {
+                "product/stack-profile.yaml": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              },
+              "additionalProperties": false
+            },
+            "summary": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "scope": [
+          "product/stack-profile.yaml"
+        ],
+        "requiredCapabilities": [
+          "skill-script"
+        ],
+        "interaction": "none",
+        "sideEffect": "read",
+        "controlsApproval": false,
+        "completion": "machine-check",
+        "failure": "repair",
+        "recovery": "manual",
+        "review": {
+          "status": "accepted",
+          "reviewedBy": "keel-source-review",
+          "contentHash": "e42b3567bc9ff3ca6a689faaa927ff988543b5e8c41d5919a050a8ec5fab0daa",
+          "capabilities": [
+            {
+              "id": "closeout",
+              "file": "SKILL.md",
+              "excerpt": "[门禁编排脚本](scripts/check.mjs)"
+            }
+          ],
+          "effects": [
+            {
+              "file": "SKILL.md",
+              "excerpt": "禁止发布、归档或自行批准。"
+            }
+          ]
+        }
+      }
+    },
+    {
       "id": "builder-guidance",
       "root": "builder-guidance",
       "contentHash": "5e096d78dd6f9d564078823e6ba66af0ac454194f5b1ab38e791ce5c5f2fedd2",
@@ -273,6 +378,20 @@
       "stepId": "native.extension.candidate.independent-review",
       "skillId": "independent-review",
       "capability": "independent-review",
+      "usage": "action"
+    },
+    {
+      "workflowId": "comet-native",
+      "stepId": "native.extension.candidate.closeout",
+      "skillId": "closeout",
+      "capability": "closeout",
+      "usage": "action"
+    },
+    {
+      "workflowId": "comet-native",
+      "stepId": "native.extension.parent.closeout",
+      "skillId": "closeout",
+      "capability": "closeout",
       "usage": "action"
     },
     {

@@ -46,6 +46,8 @@ export function createApplication(context) {
       // Machine-check gate: rerun the skill's check script and compare canonical hashes.
       governanceExtension('governance-suite', ['candidate', 'parent'], ['product/stack-profile.yaml']),
       governanceExtension('independent-review', ['candidate'], ['product/reviews/review.json']),
+      // Closeout: full atlas_check (no --fast) — 出厂测试/E2E 真跑不跳过，收口前最后一道机器门。
+      governanceExtension('closeout', ['candidate', 'parent'], ['product/stack-profile.yaml']),
     ],
   });
 }
