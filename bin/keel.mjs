@@ -181,6 +181,14 @@ const commands = {
   start(root) {
     const req = path.join(root, 'docs/comet/changes', name, 'start-request.json');
     if (!existsSync(req)) fail(`缺 ${req}；先 keel onboard。`);
+    // Clean-tree gate (0009 §3): any tracked/untracked dirt becomes part of the
+    // candidate fingerprint; committing later drifts it and locks the run.
+    // Runtime-owned files (comet-state.yaml etc.) are excluded by the gate itself.
+    const dirty = spawnSync('git', ['-C', root, 'status', '--porcelain'], { encoding: 'utf8' })
+      .stdout.split('\n').filter((l) => l.trim() && !l.includes('comet-state.yaml'));
+    if (dirty.length) {
+      fail('工作区不净，Run 中途提交会漂移候选指纹并锁死（0009 §3）。请先提交：\n' + dirty.slice(0, 10).join('\n'));
+    }
     const d = comet(root, ['runtime', 'dispatch', '--application-file', applicationFile, '--request', req], 'start');
     console.log('Run 已启动：', d.summary || JSON.stringify(d.agent || {}).slice(0, 200));
   },

@@ -40,7 +40,7 @@ parent verify 阶段三连拒，三道门层级：
 
 ## 4. 待办与边界
 
-- [ ] `keel start` 加净态前置检查（git status 非空则拒绝启动并提示提交）——0009 事故的根治。
+- [x] `keel start` 净态前置检查（git status 非空则拒绝启动并提示提交）——已实现（排除 comet-state.yaml），行为探针通过。
 - single-session 协调模式未实证（协议同路径，模式仅影响 maxParallel）。
 - integration-repair 回路未触发（本次 integration-checks 一次过）。
 - sup-change 锁死 run 保留在 /Users/xiaobin/keel-scratch/.comet 与 ~/.comet/workspaces 存档中作证据。
