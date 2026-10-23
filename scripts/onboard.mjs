@@ -116,7 +116,7 @@ if (existsSync(atlasCheckPath)) {
   const cur = existsSync(gi) ? readFileSync(gi, 'utf8') : '';
   // .atlas/runs/ is atlas runtime state (e.g. last-check-error.log written on
   // red, deleted on green) — tracking it drifts the fingerprint mid-Run.
-  const add = ['__pycache__/', '*.pyc', '.atlas/runs/'].filter((l) => !cur.split('\n').includes(l));
+  const add = ['__pycache__/', '*.pyc', '.atlas/runs/', '.worktrees/'].filter((l) => !cur.split('\n').includes(l));
   if (add.length > 0) writeFileSync(gi, cur + (cur.endsWith('\n') || cur === '' ? '' : '\n') + add.join('\n') + '\n');
   const tracked = spawnSync('git', ['-C', projectRoot, 'ls-files', '*.pyc', '.atlas/runs'], { encoding: 'utf8' });
   const pyc = (tracked.stdout || '').split('\n').filter(Boolean);
