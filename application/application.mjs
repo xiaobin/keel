@@ -48,6 +48,9 @@ export function createApplication(context) {
       governanceExtension('independent-review', ['candidate'], ['product/reviews/review.json']),
       // Closeout: full atlas_check (no --fast) — 出厂测试/E2E 真跑不跳过，收口前最后一道机器门。
       governanceExtension('closeout', ['candidate', 'parent'], ['product/stack-profile.yaml']),
+      // Walkthrough gates: machine-checkable ledger form of atlas's two human-side
+      // gates (走查单确认门/验收走查门, shared/gates.md 2.5); last gate before Verifier.
+      governanceExtension('walkthrough-gates', ['candidate', 'parent'], ['product/stack-profile.yaml']),
     ],
   });
 }

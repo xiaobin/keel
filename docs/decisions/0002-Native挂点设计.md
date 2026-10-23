@@ -173,7 +173,7 @@ Archive  （Supervisor：supervisor.parent.deliver）→ archive.prepare → arc
 1. 非需求入口（开户 all/adopt 之外的治理补账、backfill、退役、事实刷新）在 Keel 的载体：独立 Standalone 应用 vs Native 修订通道。
 2. 三环资产在用户项目的最终落位：沿用 atlas 路径约定（`product/` 等，Python 校验器零改动）还是 keel 自有目录（需验证校验器路径可配置性）。倾向前者，实现期验证后定。
 3. 实例⑤审查与 comet 独立 Verifier 的职责切分细则（两者都查候选时的分工与去重）。
-4. E2E 评审台（atlas 控制台/台账）是否随 Keel 下沉，或首版只保机器门。
+4. ~~E2E 评审台是否随 Keel 下沉~~（已决，见 §12：两道走查门下沉为 walkthrough-gates 扩展，评审台本体不下沉）。
 
 ## 9. 任务9 实证补记：independent-review 扩展落地（2026-10-23）
 
@@ -215,4 +215,24 @@ Verifier 管验收语义裁决，两者不重叠。
 §5 的 `e2e-live`（A5 E2E 真跑门）被 closeout 吸收：closeout 不带 `--fast` 跑 atlas_check
 全量，E2E 真跑三行（生成物最新/执行串行/审查报告形态）本就在其中且同链位（candidate+parent）。
 再建 e2e-live = 同链位把同一批真跑检查跑第二遍，无增量语义。从扩展族清单中移除，
-候选链位维持三扩展：governance-suite（快检）→ independent-review（审查形态）→ closeout（全量）。
+候选链位当时维持三扩展：governance-suite（快检）→ independent-review（审查形态）→ closeout（全量）（任务13 起追加 walkthrough-gates，见 §12）。
+
+## 12. 任务13 补记：走查门下沉为 walkthrough-gates 扩展（2026-10-24）
+
+§8 未决问题 4 **已决**：atlas 的走查单确认门与验收走查门（shared/gates.md 2.5，原为人侧门
+不设机器判据）下沉为新扩展 `walkthrough-gates`（scopes candidate+parent，候选链位排在
+closeout 后、Verifier 前——收口留痕的最后闸口）。设计：机器判**留痕形态**，语义归人：
+
+- 触发条件 = `product/e2e/e2e-index.md` 存在；不存在则两门 NA（pass 并注明 SKIP 语义，
+  与 closeout 对零域项目的处理一致）。
+- G1 走查单确认门：PRD 须有「用户旅程走查」节且节内首行级「已确认：<日期>」
+  （rings/prd §4·八、rings/e2e §6.2 前置门——确认后才允许 e2e 落笔）。
+- G2 验收走查门：`product/e2e/reviews/<日期>-acceptance-<域>/README.md` 留痕存在，
+  含「手工项：N 项」评估行与「验收走查：通过」。
+- 纯 node 实现（不 spawn python，atlas 侧本就没有这两门的机器校验器）；fail-closed；
+  artifactRefs=['product/stack-profile.yaml']（契约要求非空真实文件，走查产物本体由脚本内
+  读，不进哈希表——与 independent-review 的 README 同构）。
+- 探针五场景全对：零域NA / 缺节 / 缺确认行 / 缺走查README / 留痕齐备。
+
+E2E 评审台本体（控制台/台账 UI）不下沉：机器判留痕形态后，台账即 reviews 目录内容本身，
+由 git 承载历史。至此 §8 未决问题全部定案（Q1→0008，Q2→§7，Q3→§9，Q4→本节）。
