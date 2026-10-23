@@ -209,3 +209,10 @@ Verifier 管验收语义裁决，两者不重叠。
    多子任务流出现）；同 scope 串链顺序 = 声明顺序，实测
    `governance-suite(fast) → independent-review → closeout(full) → verify.verifier`。
    A10 impact 对账未下沉：keel 流暂无「预测集」产物，待有预测载体再议。
+
+## 11. 任务10 补记之二：e2e-live 不单独实现（2026-10-23）
+
+§5 的 `e2e-live`（A5 E2E 真跑门）被 closeout 吸收：closeout 不带 `--fast` 跑 atlas_check
+全量，E2E 真跑三行（生成物最新/执行串行/审查报告形态）本就在其中且同链位（candidate+parent）。
+再建 e2e-live = 同链位把同一批真跑检查跑第二遍，无增量语义。从扩展族清单中移除，
+候选链位维持三扩展：governance-suite（快检）→ independent-review（审查形态）→ closeout（全量）。
