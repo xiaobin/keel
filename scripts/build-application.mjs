@@ -43,7 +43,8 @@ function skillContentHash(root) {
 
 function runtimeVersion() {
   if (process.env.COMET_VERSION) return process.env.COMET_VERSION;
-  const sibling = path.resolve(repoRoot, '../comet/package.json');
+  let sibling;
+  try { sibling = createRequire(import.meta.url).resolve('@rpamis/comet/package.json'); } catch { sibling = path.resolve(repoRoot, '../comet/package.json'); }
   if (existsSync(sibling)) {
     try {
       return JSON.parse(readFileSync(sibling, 'utf8')).version;
@@ -51,7 +52,7 @@ function runtimeVersion() {
       throw new Error(`comet package.json 无法解析：${sibling}`);
     }
   }
-  throw new Error('comet version unknown: set COMET_VERSION or keep a sibling ../comet checkout');
+  throw new Error('comet version unknown: set COMET_VERSION or npm install @rpamis/comet');
 }
 
 const skills = ['governance-suite', 'independent-review', 'closeout', 'walkthrough-gates', 'builder-guidance'].map((id) => ({

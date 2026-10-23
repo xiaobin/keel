@@ -8,6 +8,7 @@ import { spawnSync, execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const applicationFile = path.join(repoRoot, 'application/application.json');
@@ -34,8 +35,13 @@ function projectRoot() {
 }
 
 function cometBin() {
-  const bin = process.env.COMET_BIN || path.resolve(repoRoot, '../comet/bin/comet.js');
-  if (!existsSync(bin)) fail(`找不到 comet 仓内构建：${bin}（设 COMET_BIN 或构建 comet）。全局 PATH 的 comet 可能版本不符，禁用。`);
+  let bin = process.env.COMET_BIN;
+  if (!bin) {
+    // Installed mode: resolve the comet dependency the same way application.mjs imports do.
+    try { bin = createRequire(import.meta.url).resolve('@rpamis/comet/bin/comet.js'); } catch { /* fall through to dev checkout */ }
+  }
+  if (!bin) bin = path.resolve(repoRoot, '../comet/bin/comet.js');
+  if (!existsSync(bin)) fail(`找不到 comet 运行时：${bin}（npm install 获取 @rpamis/comet，或设 COMET_BIN）。全局 PATH 的 comet 可能版本不符，禁用。`);
   return bin;
 }
 
@@ -172,6 +178,11 @@ const cmd = process.argv[2];
 const name = process.argv[3];
 
 const commands = {
+  selftest() {
+    const r = spawnSync('node', [path.join(repoRoot, 'scripts/selftest.mjs')], { stdio: 'inherit' });
+    process.exit(r.status ?? 1);
+  },
+
   onboard(root) {
     const n = name || fail('usage: keel onboard <change> [--project-root <p>]');
     const r = spawnSync('node', [path.join(repoRoot, 'scripts/onboard.mjs'), '--project-root', root, '--name', n], { stdio: 'inherit' });
@@ -431,12 +442,13 @@ if (!cmd || cmd === 'help' || cmd === '--help') {
   keel verify <change> --payload <f.json>  独立 Verifier 裁决
   keel confirm <change> --summary <说明> [--coordination-mode multi-session|single-session]  确认当前等待（Shape/验收；Supervisor 分流需 coordination-mode）
   keel archive <change>   归档
+  keel selftest           全链回归自验（约 5 分钟）
 
-通用：--project-root <p>（默认 cwd，必须物理路径）；COMET_BIN 指定 comet 仓内构建。
+通用：--project-root <p>（默认 cwd，必须物理路径）；COMET_BIN 指定 comet 运行时（默认取 npm 依赖 @rpamis/comet）。
 build payload: {summary, acceptanceReview:[{id,status,evidence,note}], checks, knownLimits, verificationChecks}
 verify payload: {verdict, summary, acceptance:[{id,result,reason}], risks}`);
   process.exit(0);
 }
 if (!commands[cmd]) fail(`未知命令：${cmd}（keel help）`);
-if (cmd !== 'onboard' && !name) fail(`keel ${cmd} 需要 <change> 名`);
+if (cmd !== 'onboard' && cmd !== 'selftest' && !name) fail(`keel ${cmd} 需要 <change> 名`);
 commands[cmd](projectRoot());

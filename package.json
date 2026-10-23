@@ -1,19 +1,21 @@
 {
-  "name": "keel",
+  "name": "keel-harness",
   "version": "0.1.0",
   "dependencies": {
-    "@rpamis/comet": "file:../comet"
+    "@rpamis/comet": "^0.5.0"
   },
   "scripts": {
     "selftest": "node scripts/selftest.mjs",
     "build:application": "node scripts/build-application.mjs",
-    "onboard": "node scripts/onboard.mjs"
+    "onboard": "node scripts/onboard.mjs",
+    "prepublishOnly": "npm run build:application"
   },
   "description": "Project Harness workflow for the full AI-coding lifecycle — Comet Native runtime × Atlas governance",
   "license": "MIT",
   "type": "module",
   "bin": { "keel": "bin/keel.mjs" },
-  "private": true,
+  "publishConfig": { "access": "public" },
+  "files": ["bin", "application", "scripts", "vendor", "assets", "docs/安装使用手册.md", "README.md"],
   "engines": {
     "node": ">=22.16"
   }
