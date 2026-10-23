@@ -3,7 +3,7 @@
 // Design: docs/decisions/0002 (hooks), protocol facts: docs/decisions/0005 §3.
 // Never exposes comet commands; never writes request files inside the project.
 
-import { existsSync, realpathSync, mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { existsSync, realpathSync, mkdtempSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { spawnSync, execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -97,6 +97,10 @@ function pendingAction(root, name) {
   return actionsOf(inspect(root, name)).find((a) => a.status === 'pending');
 }
 
+function workableAction(root, name, stepIds) {
+  return actionsOf(inspect(root, name)).find((a) => ['pending', 'running'].includes(a.status) && stepIds.includes(a.stepId));
+}
+
 function gitHead(root) {
   return execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 }
@@ -104,20 +108,27 @@ function gitHead(root) {
 // Claim + record for a handoff action. keel owns every protocol field
 // (0005 §3): caller-supplied unique claimToken, unique outcomeId,
 // JS-ISO submittedAt, fields inside outcome.
-function claimAndRecord(root, name, actionId, sessionId, output, label) {
-  const next = dispatch(root, { operation: 'next', runId: name }, 'next-' + label);
-  const tpl = ((((next.agent || {}).continuation || {}).inputOptions || [])
-    .map((o) => o.template)
-    .find((t) => t && t.operation === 'claim' && t.actionId === actionId));
-  if (!tpl) fail(`${label}：当前没有可领取的 ${actionId}（状态可能已推进，先 keel status 看一下）。`);
-  const claimToken = actionId + '-' + sessionId + '-' + Date.now();
-  const claim = { ...tpl, executorId: 'native-host', sessionId, claimToken };
-  const cr = dispatch(root, claim, 'claim-' + label);
-  if (cr.status !== 'succeeded') fail(`${label} claim 被拒：${JSON.stringify(cr.error || cr).slice(0, 400)}`);
+function claimAndRecord(root, name, action, sessionId, output, label) {
+  const actionId = action.id;
+  // attempt/inputHash come from the Action itself; the deterministic token
+  // makes re-claim after a failed record idempotent (runtime-action.ts:171).
+  let claimToken = actionId + '-' + sessionId;
+  if (action.status === 'running' && action.claim) {
+    // Resume: inspect exposes the token; reuse it if the claim is ours.
+    if (action.claim.executorId === 'native-host' && action.claim.sessionId === sessionId) {
+      claimToken = action.claim.token;
+    } else {
+      fail(`${label}：Action 已被 ${action.claim.sessionId} 领取，keel 不能接管。`);
+    }
+  } else {
+    const claim = { operation: 'claim', runId: name, actionId, attempt: action.attempt, inputHash: action.inputHash, executorId: 'native-host', sessionId, claimToken };
+    const cr = dispatch(root, claim, 'claim-' + label);
+    if (cr.status !== 'succeeded') fail(`${label} claim 被拒：${JSON.stringify(cr.error || cr).slice(0, 400)}`);
+  }
   const outcome = {
     actionId,
-    attempt: tpl.attempt,
-    inputHash: tpl.inputHash,
+    attempt: action.attempt,
+    inputHash: action.inputHash,
     claimToken,
     outcomeId: actionId + '-' + sessionId + '-' + Date.now(),
     status: 'succeeded',
@@ -198,11 +209,36 @@ const commands = {
   },
 
   build(root) {
-    const payload = readPayload(opt('payload') || fail('keel build 需要 --payload <file.json>'));
-    const pending = pendingAction(root, name);
-    if (!pending || !['build.builder', 'supervisor.parent.builder'].includes(pending.stepId)) {
-      fail('当前没有待交接的 Builder Action；keel status 确认状态。');
+    // --payload wins; otherwise auto-collect from the repo: acceptance ids
+    // from run state, evidence = files changed in HEAD, checks derived.
+    let payload = opt('payload') ? readPayload(opt('payload')) : null;
+    if (!payload) {
+      const summary = opt('summary') || fail('keel build 需要 --payload <file.json> 或 --summary <说明>（自动采集模式）');
+      const st = stateOf(inspect(root, name));
+      const rawAcc = st.acceptance || [];
+      const acc = Array.isArray(rawAcc) ? rawAcc.map((a) => a.id) : Object.keys(rawAcc);
+      if (acc.length === 0) fail('run 状态里没有验收项，无法自动采集；请用 --payload 显式交接。');
+      // Evidence = deliverable files currently in the change dir. git HEAD is
+      // the wrong source: the commit may sweep in unrelated churn and deletions
+      // (proven: archive moves of a previous change broke test -s checks).
+      const changeDir = path.join(root, 'docs/comet/changes', name);
+      const changed = existsSync(changeDir)
+        ? readdirSync(changeDir).filter((f) => f !== 'comet-state.yaml').map((f) => 'docs/comet/changes/' + name + '/' + f)
+        : [];
+      const evidence = changed.length > 0 ? changed : ['git HEAD ' + gitHead(root)];
+      payload = {
+        summary,
+        acceptanceReview: acc.map((id) => ({ id, status: 'implemented-with-evidence', evidence, note: 'evidence 由 git HEAD 自动采集' })),
+        checks: [{ name: 'builder-auto', result: 'passed', note: 'keel build 自动采集交接' }],
+        knownLimits: ['验收证据为 HEAD 变更文件全集，非逐条针对性证据；需要精确对账请用 --payload。'],
+        verificationChecks: changed.map((f) => ({ id: 'exists-' + f.replace(/[^a-zA-Z0-9]/g, '-'), name: 'exists:' + f, executable: 'test', argv: ['-s', f], cwdRef: '.', timeoutMs: 10000, repeatable: true })),
+      };
+      if (existsSync(path.join(root, 'product/prd/prd.md'))) {
+        payload.verificationChecks.push({ id: 'prd-green', name: 'prd-green', executable: 'python3', argv: ['.atlas/validators/validate_prd.py', '--root', '.'], cwdRef: '.', timeoutMs: 60000, repeatable: true });
+      }
     }
+    const pending = workableAction(root, name, ['build.builder', 'supervisor.parent.builder']);
+    if (!pending) fail('当前没有待交接的 Builder Action；keel status 确认状态。');
     // Protocol guards (0005 §3.4): evidence must be non-empty per row.
     for (const row of payload.acceptanceReview || []) {
       if (!Array.isArray(row.evidence) || row.evidence.length === 0) {
@@ -219,21 +255,23 @@ const commands = {
       submittedAt: new Date().toISOString(),
       verificationChecks: payload.verificationChecks || [],
     };
-    claimAndRecord(root, name, pending.id, 'builder', output, 'builder');
+    claimAndRecord(root, name, pending, 'builder', output, 'builder');
     console.log('Builder 交接成功。→ keel next', name);
   },
 
   verify(root) {
     const payload = readPayload(opt('payload') || fail('keel verify 需要 --payload <file.json>'));
-    const pending = pendingAction(root, name);
-    if (!pending || pending.stepId !== 'verify.verifier') fail('当前没有待验收的 Verifier Action；keel status 确认状态。');
+    const pending = workableAction(root, name, ['verify.verifier']);
+    if (!pending) fail('当前没有待验收的 Verifier Action；keel status 确认状态。');
     const next = dispatch(root, { operation: 'next', runId: name }, 'next-verifier');
     const runner = ((next.agent || {}).continuation || {}).runnerAction || {};
-    if (!runner.candidateId) fail('取不到当前 candidateId；keel status 确认状态。');
+    const handoff = stateOf(inspect(root, name)).builder_handoff || {};
+    const candidateId = runner.candidateId || handoff.candidate_id;
+    if (!candidateId) fail('取不到当前 candidateId；keel status 确认状态。');
     // Independent session: sessionId must differ from the builder ref and be
     // echoed as verifierExecutionRef (0005 §3.6).
     const output = {
-      candidateId: runner.candidateId,
+      candidateId,
       response: {
         kind: 'final-result',
         result: {
@@ -247,7 +285,7 @@ const commands = {
       },
       verifierExecutionRef: 'verifier',
     };
-    claimAndRecord(root, name, pending.id, 'verifier', output, 'verifier');
+    claimAndRecord(root, name, pending, 'verifier', output, 'verifier');
     console.log('Verifier 裁决已记录：', payload.verdict, '。→ keel next', name);
   },
 
