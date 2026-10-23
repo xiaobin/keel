@@ -11,6 +11,7 @@
   "description": "Project Harness workflow for the full AI-coding lifecycle — Comet Native runtime × Atlas governance",
   "license": "MIT",
   "type": "module",
+  "bin": { "keel": "bin/keel.mjs" },
   "private": true,
   "engines": {
     "node": ">=22.16"
