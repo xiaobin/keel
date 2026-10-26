@@ -865,6 +865,93 @@ def test_f37_empty_assembly_is_warn_not_skip() -> None:
         assert "装配集为空" in row["detail"], row
 
 
+# ---- RFC-20261023-02 ②：装配基线 manifest（逐文件指名 + 配对校验 + 旧装配降级）----
+
+
+def test_rfc20261023_02_manifest_drift_names_files_with_action_words() -> None:
+    """配对成立且漂移 ⇒ 逐文件指名（改/增/删 + 计数）；M68 三词在两分支各自复断言。"""
+    with tempfile.TemporaryDirectory() as td:
+        src, root = Path(td) / "atlas", Path(td) / "proj"
+        (src / "scripts").mkdir(parents=True)
+        (src / "scripts" / "a.py").write_text("a1\n", encoding="utf-8")
+        (src / "scripts" / "b.py").write_text("b1\n", encoding="utf-8")
+        root.mkdir()
+        _stamp(src, root)
+        (src / "scripts" / "a.py").write_text("a2\n", encoding="utf-8")
+        (src / "scripts" / "c.py").write_text("c1\n", encoding="utf-8")
+        (src / "scripts" / "b.py").unlink()
+        row = _version_rows(root)["装配版本"]
+        assert row["status"] == "WARN", row
+        assert "改 1 / 增 1 / 删 1" in row["detail"], row
+        for name in ("scripts/a.py", "scripts/c.py", "scripts/b.py"):
+            assert name in row["detail"], row
+        for word in ("atlas upgrade", "install.sh", "backflow"):      # M68 双分支
+            assert word in row["detail"], row
+
+
+def test_rfc20261023_02_manifest_caps_named_files_and_counts_rest() -> None:
+    """cap 10：同类超 10 只点名前 10 + 「等 N 项」（O3：上限改 0 也绿不可接受）。"""
+    with tempfile.TemporaryDirectory() as td:
+        src, root = Path(td) / "atlas", Path(td) / "proj"
+        (src / "scripts").mkdir(parents=True)
+        for i in range(12):
+            (src / "scripts" / f"f{i:02d}.py").write_text("v1\n", encoding="utf-8")
+        root.mkdir()
+        _stamp(src, root)
+        for i in range(12):
+            (src / "scripts" / f"f{i:02d}.py").write_text("v2\n", encoding="utf-8")
+        row = _version_rows(root)["装配版本"]
+        assert row["status"] == "WARN", row
+        assert "改 12" in row["detail"] and "等 12 项" in row["detail"], row
+
+
+def test_rfc20261023_02_manifest_unpaired_warns() -> None:
+    """manifest.digest ≠ 装配戳 ⇒ 半态 WARN（配对校验先行，不拿脏 manifest 逐文件指名）。
+
+    变异：**M-new-4** 摘配对校验 ⇒ 本侧红（会落进「逐文件无差异」或错误指名）。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        src, root = Path(td) / "atlas", Path(td) / "proj"
+        (src / "scripts").mkdir(parents=True)
+        (src / "scripts" / "a.py").write_text("a1\n", encoding="utf-8")
+        root.mkdir()
+        _stamp(src, root)
+        mf = root / ".atlas" / "MANIFEST.json"
+        data = json.loads(mf.read_text(encoding="utf-8"))
+        data["digest"] = "deadbeefdeadbeef"
+        mf.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        row = _version_rows(root)["装配版本"]
+        assert row["status"] == "WARN" and "不配套" in row["detail"], row
+        for word in ("atlas upgrade", "install.sh", "backflow"):
+            assert word in row["detail"], row
+
+
+def test_rfc20261023_02_manifest_malformed_warns() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        src, root = Path(td) / "atlas", Path(td) / "proj"
+        (src / "scripts").mkdir(parents=True)
+        (src / "scripts" / "a.py").write_text("a1\n", encoding="utf-8")
+        root.mkdir()
+        _stamp(src, root)
+        (root / ".atlas" / "MANIFEST.json").write_text("{not-json", encoding="utf-8")
+        row = _version_rows(root)["装配版本"]
+        assert row["status"] == "WARN" and "形态非法" in row["detail"], row
+
+
+def test_rfc20261023_02_manifest_missing_is_legacy_ok_with_footnote() -> None:
+    """旧装配（VERSION 在、manifest 缺）⇒ ok + 「正式判据未齐」尾注（S4，不新增红）。"""
+    with tempfile.TemporaryDirectory() as td:
+        src, root = Path(td) / "atlas", Path(td) / "proj"
+        (src / "scripts").mkdir(parents=True)
+        (src / "scripts" / "a.py").write_text("a1\n", encoding="utf-8")
+        root.mkdir()
+        stamped = _stamp(src, root)
+        (root / ".atlas" / "MANIFEST.json").unlink()
+        row = _version_rows(root)["装配版本"]
+        assert row["status"] == "ok" and "旧装配无 manifest" in row["detail"], row
+        assert stamped in row["detail"], row
+
+
 def test_atlas_check_failure_log_written_on_fail_and_cleaned_on_pass() -> None:
     """atlas_check.py 失败时落盘 .atlas/runs/last-check-error.log；全绿时自动清理。"""
     with tempfile.TemporaryDirectory() as td:
@@ -900,6 +987,112 @@ def test_atlas_check_failure_log_written_on_fail_and_cleaned_on_pass() -> None:
         code_clean, out_clean = run(["--root", ".", "--fast"], root_clean)
         assert code_clean == 0, out_clean
         assert not fake_log.is_file(), "全绿时必须自动清理旧的 last-check-error.log"
+
+
+def test_check_events_log_records_durations_on_fail() -> None:
+    """P2（2026-10-23）：每轮向 `.atlas/runs/check-events.jsonl` 追加一行，
+    行内含门名/状态/耗时；JSON 输出同字段；失败轮也要写，且是追加不是覆盖。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / ".atlas").mkdir(parents=True, exist_ok=True)
+        os.symlink(PKG_ROOT / "validators", root / ".atlas" / "validators")
+        os.symlink(PKG_ROOT / "scripts", root / ".atlas" / "scripts")
+        (root / "product").mkdir(parents=True, exist_ok=True)
+        (root / "product" / "stack-profile.yaml").write_text(
+            "product: 夹具\napps:\n  - name: web\n    path: web\n    kind: frontend\n"
+            "    role: landing\n    stack: x\n", encoding="utf-8")
+        c = root / "product" / "e2e" / "cases"
+        c.mkdir(parents=True, exist_ok=True)
+        (c / "home.md").write_text(CASE_BAD, encoding="utf-8")
+
+        code, out = run(["--root", ".", "--fast", "--json"], root)
+        assert code == 1, out
+        log = root / ".atlas" / "runs" / "check-events.jsonl"
+        assert log.is_file(), "失败轮也必须写运行事件行"
+        lines = log.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1, lines
+        ev = json.loads(lines[0])
+        assert ev["ok"] is False
+        assert ev["fast"] is True
+        assert ev["page"] is None
+        assert ev["timestamp"]
+        assert set(ev) >= {"timestamp", "git_head", "git_dirty", "ok", "fast",
+                           "page", "ablation_id", "rows"}
+        assert all({"name", "status", "duration_ms"} <= set(r) for r in ev["rows"]), ev
+        by_name = {r["name"]: r for r in ev["rows"]}
+        assert isinstance(by_name["validate_e2e_index"]["duration_ms"], int), by_name
+        payload = json.loads(out)
+        assert any(r.get("duration_ms") is not None for r in payload["rows"]), payload
+
+        code2, out2 = run(["--root", ".", "--fast"], root)
+        assert code2 == 1, out2
+        assert len(log.read_text(encoding="utf-8").splitlines()) == 2, "事件行必须追加，不得覆盖"
+
+
+def test_check_events_log_written_on_ok_run() -> None:
+    """P2：全绿轮同样写事件行（ok=true），观测面不为失败轮专属。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        code, out = run(["--root", ".", "--fast", "--json"], root)
+        assert code == 0, out
+        log = root / ".atlas" / "runs" / "check-events.jsonl"
+        assert log.is_file()
+        ev = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+        assert ev["ok"] is True
+        assert ev["fast"] is True
+        assert isinstance(ev["rows"], list)
+
+
+def test_check_events_log_write_failure_does_not_fail_check() -> None:
+    """P2：观测面写失败（`.atlas/runs` 被文件占用）不得反过来把检查判红。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / ".atlas").mkdir()
+        (root / ".atlas" / "runs").write_text("not a dir", encoding="utf-8")
+        code, out = run(["--root", ".", "--fast"], root)
+        assert code == 0, out
+        assert "OK" in out
+
+
+def test_check_events_log_serialization_failure_does_not_raise(monkeypatch) -> None:
+    """P2 blocker（评审 2026-10-23）：事件写入只捕 OSError 时，序列化 / 编码异常
+    会从观测面漏成检查崩溃。这里让 `json.dumps` 抛 TypeError，助手必须吞掉。"""
+    mod = _load_check()
+    with tempfile.TemporaryDirectory() as td:
+        rows = mod.Row()
+        rows.add("x", "ok", "")
+        monkeypatch.setattr(mod.json, "dumps", lambda *a, **k: (_ for _ in ()).throw(TypeError("boom")))
+        mod._write_check_event(Path(td), rows, fast=True, page=None)  # 不得抛
+
+
+def test_check_event_git_state_ignores_atlas_runtime() -> None:
+    """P2 major（评审 2026-10-23）：`.atlas/` 是运行态，不得把仓库判脏；
+    非 git 目录无法判定 ⇒ None，不冒充 clean。"""
+    mod = _load_check()
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        def git(*args: str) -> None:
+            subprocess.run(["git", *args], cwd=str(root), check=True,
+                           capture_output=True, text=True)
+        git("init")
+        git("config", "user.email", "t@example.com")
+        git("config", "user.name", "t")
+        (root / "a.txt").write_text("a", encoding="utf-8")
+        git("add", "a.txt")
+        git("commit", "-m", "init")
+        head, dirty = mod._git_state(root)
+        assert head != "unknown" and dirty is False
+        (root / ".atlas" / "runs").mkdir(parents=True)
+        (root / ".atlas" / "runs" / "check-events.jsonl").write_text("{}\n", encoding="utf-8")
+        _head, dirty_runtime = mod._git_state(root)
+        assert dirty_runtime is False, "`.atlas/` 运行态不得把仓库判脏"
+        (root / "a.txt").write_text("changed", encoding="utf-8")
+        _head, dirty_tracked = mod._git_state(root)
+        assert dirty_tracked is True
+    with tempfile.TemporaryDirectory() as td:
+        _head, dirty_unknown = mod._git_state(Path(td))
+        assert dirty_unknown is None, "非 git 目录不得冒充 clean"
 
 
 def test_check_review_report_exposes_fake_stub_and_warns_baseline() -> None:
@@ -984,3 +1177,23 @@ def test_serial_execution_gate_bites_on_parallel_config() -> None:
         # 否则「两判据同破」的夹具会让任意一条判据被摘掉时仍绿（门钉失效）。
         assert gate("export default defineConfig({ workers: 4, fullyParallel: false });\n") == "FAIL"
         assert gate("export default defineConfig({ workers: 1, fullyParallel: true });\n") == "FAIL"
+
+
+def test_layout_config_drives_preconditions_and_fails_loud(tmp_path) -> None:
+    """RFC-20261026-01：前置路径随布局配置；非法配置 ⇒ 单行 FAIL。"""
+    mod = _load_check()
+    (tmp_path / "atlas.config.yaml").write_text(
+        "version: 1\nlayout:\n  assets_root: docs\n", encoding="utf-8")
+    pre = mod._gate_preconditions(tmp_path)
+    assert pre["validate_stack_profile"][0] == "docs/stack-profile.yaml"
+    assert pre["validate_adr"][0] == "docs/adr"
+    rows = mod.Row()
+    assert mod.check_layout(tmp_path, rows)
+    assert not rows.failed
+
+    (tmp_path / "atlas.config.yaml").write_text(
+        "version: 1\nlayout:\n  assets_root: ../escape\n", encoding="utf-8")
+    rows = mod.Row()
+    assert not mod.check_layout(tmp_path, rows)
+    assert rows.failed
+    assert rows.rows[0]["name"] == "项目布局配置"

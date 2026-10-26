@@ -33,9 +33,9 @@
     凭据只来自运行期环境变量 `ATLAS_APP_USER` / `ATLAS_APP_PASSWORD`（不读项目 `.env`、不硬编码）；
     未设置 ⇒ 跳过预置 + 明确警告；换取令牌失败 ⇒ 报错中止
     （不得静默续跑——那会退化成「未登录态跑用例」的假绿）。
-    **段缺失 = 未声明（不再是「合法降级」）**：`validate_stack_profile` 已 WARN 指名；
-    生成器升档点 = 下一次真跑准备日（见 `shared/gates.md`「E2E 真跑」行——届时改推
-    `not_ready`：退出码 3 + 机读 `not_ready: "app_login"`）。
+    **段缺失 = 未声明（不再是「合法降级」，D80② 升档已落地 2026-10-24 / `DESIGN.md` D149）**：
+    `validate_stack_profile` WARN 指名在前；生成器直接推 `not_ready`：退出码 3 + 机读
+    `not_ready: "app_login"`（文案按 D103 指路「有门但三态都装不下 ⇒ 人工会话取出」）。
   * **网络边界打桩**（契约 §5.8，2026-10-12）：`mock:` 行（用例级）在 `e2e.mock.mode: on`
     时编译为**单条** `context.route` 派发表（pathname+method 命中、query 免疫；前缀内未命中
     fail-loud abort + 用例末审计断言点名；OPTIONS 自动 204 + CORS 头）；fixture 内容**生成期
@@ -51,8 +51,8 @@
 退出码（`3509 §B110`）：**0** 正常 · **2** 真错（缺 profile / 动词越界 / 审查门不过…） ·
 **3** 前置未声明 —— **3 不是失败**：调用方应判「未就绪」而不是「生成失败」，
 且 `--json` 下 stdout 给出 `{"ok": false, "not_ready": <键>, …}`。
-当阶段键 = `app_base_url`（地址未声明）；`app_login` 未声明按 RFC-20261015-02 于
-下一次真跑准备日并入同一通道（机读键 `"app_login"`，升档记录见 `shared/gates.md`「E2E 真跑」行）。
+键 = `app_base_url`（地址未声明）/ `app_login`（登录形态未声明；D80② 升档 2026-10-24 落地，
+`DESIGN.md` D149，升档记录见 `shared/gates.md`「E2E 真跑」行）。
 """
 from __future__ import annotations
 
@@ -68,6 +68,7 @@ from pathlib import Path
 if str(Path(__file__).resolve().parents[1]) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _support.siblings import load_module  # noqa: E402
+from _support.layout import LayoutError, load_layout  # noqa: E402
 
 _sp = load_module("stack_profile")
 parse_profile = _sp.parse_profile  # 单源别名（原实现已并入 `_support/stack_profile.py`）
@@ -94,7 +95,7 @@ MOCK_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 
 # 分片 step / expected 的动词词表（契约 `rings/e2e/reference.md` §5.5，2026-09-23 定）
 ACTION_VERBS = ("click", "fill", "select", "check", "uncheck", "press", "type", "hover", "refresh", "goto", "waitFor", "download", "upload", "dispatch")
-ASSERT_VERBS = ("text", "contains", "count", "countOptions", "visible", "hidden", "enabled", "disabled", "checked", "unchecked", "value", "attr", "delta")
+ASSERT_VERBS = ("text", "contains", "count", "countOptions", "visible", "hidden", "enabled", "disabled", "checked", "unchecked", "value", "attr", "delta", "request")
 NO_TESTID_VERBS = ("refresh", "goto")  # 这两个动词第二个 token 不是 testid（goto 的值是路径）
 # 契约 §5.5（2026-10-16 补，issue #R4）：`click` / `hover` 默认追加 `{ force: true }`
 # （动机：真实 UI 里悬浮遮罩 / 动画 / 父容器事件拦截会造出动作执行超时的**假红**）。
@@ -186,6 +187,46 @@ def parse_line(line: str) -> tuple[str, str, str, str]:
     return verb, (parts[1] if len(parts) > 1 else ""), (parts[2] if len(parts) > 2 else ""), note.strip()
 
 
+def case_uses_request(case: dict) -> bool:
+    """契约 §5.5（D142）：该用例是否含 `request` 断言（决定 watcher/helper/trace 发射）。"""
+    return any(parse_line(split_after(split_prefix(raw)[1])[1])[0] == "request"
+               for raw in (case.get("expected") or []))
+
+
+def split_request_assertion(value: str) -> tuple[str, str]:
+    """`request <api> <json-path> <expected>` 的值段 → (path, expected)。
+
+    path 不允许空白；expected 可含空格（JSON 对象/数组）。`(空)` 与 request 的三态
+    语义冲突（无法区分「缺失」与「null」）⇒ 生成期中止，要求用 `(缺席)` / `null` / `""`。
+    """
+    path, _, expected = value.strip().partition(" ")
+    path, expected = path.strip(), expected.strip()
+    if not path or not expected:
+        raise ValueError(f"`request` 需要 `<json-path> <expected>` 两个参数: {value!r}（契约 §5.5）")
+    if re.search(r"\s", path):
+        raise ValueError(f"`request` 的 json-path 不得含空白: {path!r}")
+    if expected == "(空)":
+        raise ValueError("`request` 不接受 `(空)`：请用 `(缺席)` / `null` / `\"\"` 区分三态")
+    return path, expected
+
+
+def request_expected_js(expected: str) -> str:
+    """`request` 期望值的 JS 字面量：`(缺席)` → sentinel；`null/true/false/数字/JSON` → 字面量；
+    其余按字符串。字符串形态与现有 DSL 一致（不加引号即按字符串处理）。"""
+    raw = expected.strip()
+    if raw == "(缺席)":
+        return "ATLAS_ABSENT"
+    if raw in ("null", "true", "false") or re.fullmatch(r"-?\d+(?:\.\d+)?", raw):
+        return raw
+    if raw[:1] in ('"', "[", "{"):
+        try:
+            json.loads(raw)
+            return raw
+        except ValueError:
+            pass
+    return json.dumps(raw, ensure_ascii=False)
+
+
 def parse_tid_nth(raw_tid: str) -> tuple[str, int | None]:
     """把 `<tid>[<N>]` 拆成 (base_tid, index)。无下标返回 (raw_tid, None)。（D120 / issue #31）"""
     m = re.match(r"^([a-z0-9-]+)\[(\d+)\]$", raw_tid)
@@ -209,7 +250,7 @@ def tid_locator(raw_tid: str) -> str:
 parse_block = load_module("case_block").parse_block
 
 
-def gather_cases(cases: Path) -> dict[str, list[dict]]:
+def gather_cases(cases: Path, shard_prefix: str) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = {}
     for md in sorted(cases.glob("*.md")):
         text = md.read_text(encoding="utf-8")
@@ -223,7 +264,7 @@ def gather_cases(cases: Path) -> dict[str, list[dict]]:
             d = parse_block(block)
             if d.get("id"):
                 d["_title"] = titles.get(d["id"], "")
-                d["_shard"] = f"product/e2e/cases/{md.name}"
+                d["_shard"] = f"{shard_prefix}/{md.name}"
                 items.append(d)
         out[md.stem] = items
     return out
@@ -424,6 +465,112 @@ def session_env_name(key: str) -> str:
     return "ATLAS_SESSION_" + re.sub(r"[^0-9A-Za-z]+", "_", key).strip("_").upper()
 
 
+def ts_request_helpers() -> str:
+    """D142 请求断言 helper（仅含 request 断言的页面发射，保证无该动词时零变化）。"""
+    return (
+        "const ATLAS_ABSENT = Symbol('atlas-absent');\n"
+        "type AtlasReqRecord = { seq: number; api: string; body: any; parseError?: string };\n"
+        "function atlasWatchRequests(page: any) {\n"
+        "  const state = ((page as any).__atlasReq ??= { seq: 0, records: [] as AtlasReqRecord[] });\n"
+        "  page.on('request', (req: any) => {\n"
+        "    try {\n"
+        "      const api = new URL(req.url()).searchParams.get('api');\n"
+        "      if (!api) return;\n"
+        "      const headers = req.headers() || {};\n"
+        "      const ct = String(headers['content-type'] || '').toLowerCase();\n"
+        "      const raw = req.postData();\n"
+        "      let body: any = null;\n"
+        "      let parseError: string | undefined;\n"
+        "      try {\n"
+        "        if (ct.includes('application/x-www-form-urlencoded') && raw) {\n"
+        "          const p = new URLSearchParams(raw).get('params');\n"
+        "          body = p ? JSON.parse(p) : null;\n"
+        "        } else if (ct.includes('application/json') && raw) {\n"
+        "          body = JSON.parse(raw);\n"
+        "        } else {\n"
+        "          body = raw;\n"
+        "        }\n"
+        "      } catch (e: any) {\n"
+        "        parseError = e?.message || 'request body parse error';\n"
+        "      }\n"
+        "      state.seq += 1;\n"
+        "      state.records.push({ seq: state.seq, api, body, parseError });\n"
+        "      if (state.records.length > 100) state.records.shift();\n"
+        "    } catch { /* 非 HTTP/URL 异常不参与断言 */ }\n"
+        "  });\n"
+        "}\n"
+        "function atlasRequestMark(page: any): number {\n"
+        "  return ((page as any).__atlasReq?.seq) || 0;\n"
+        "}\n"
+        "function atlasReqResolve(body: any, path: string) {\n"
+        "  const segments = path.split('.');\n"
+        "  let cur = body;\n"
+        "  for (let i = 0; i < segments.length; i += 1) {\n"
+        "    const raw = segments[i];\n"
+        "    const base = raw.split('[')[0];\n"
+        "    const brackets = raw.slice(base.length);\n"
+        "    if (base) {\n"
+        "      if (cur === null || typeof cur !== 'object' || Array.isArray(cur)) {\n"
+        "        throw new Error(`request 路径解析失败：${path} 在 ${base} 处不是对象`);\n"
+        "      }\n"
+        "      if (!(base in cur)) {\n"
+        "        if (i === segments.length - 1 && !brackets) return { found: false, value: undefined };\n"
+        "        throw new Error(`request 路径解析失败：${path} 缺少中间键 ${base}`);\n"
+        "      }\n"
+        "      cur = cur[base];\n"
+        "    }\n"
+        "    const parts = Array.from(brackets.matchAll(/\\[([^\\]]+)\\]/g)).map((m) => m[1]);\n"
+        "    for (const part of parts) {\n"
+        "      if (!Array.isArray(cur)) throw new Error(`request 路径解析失败：${path} 的 [${part}] 不是数组`);\n"
+        "      if (/^\\d+$/.test(part)) {\n"
+        "        const idx = Number(part);\n"
+        "        if (idx >= cur.length) throw new Error(`request 路径解析失败：${path} 数组越界 [${idx}]`);\n"
+        "        cur = cur[idx];\n"
+        "        continue;\n"
+        "      }\n"
+        "      const eq = part.indexOf('=');\n"
+        "      if (eq <= 0) throw new Error(`request 路径语法错误：${path} 的 [${part}]`);\n"
+        "      const key = part.slice(0, eq);\n"
+        "      const want = part.slice(eq + 1);\n"
+        "      const hits = cur.filter((item: any) => item && String(item[key]) === want);\n"
+        "      if (hits.length !== 1) throw new Error(`request 路径解析失败：${path} 的 [${part}] 命中 ${hits.length} 条（须恰一）`);\n"
+        "      cur = hits[0];\n"
+        "    }\n"
+        "  }\n"
+        "  return { found: true, value: cur };\n"
+        "}\n"
+        "function atlasReqType(v: any): string {\n"
+        "  if (v === null) return 'null';\n"
+        "  if (Array.isArray(v)) return `array(${v.length})`;\n"
+        "  return typeof v;\n"
+        "}\n"
+        "function atlasReqEqual(a: any, b: any): boolean {\n"
+        "  if (a === b) return true;\n"
+        "  try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }\n"
+        "}\n"
+        "async function atlasExpectRequest(page: any, api: string, path: string, expected: any, mark: number) {\n"
+        "  let rec: any = null;\n"
+        "  await expect.poll(() => {\n"
+        "    const st = (page as any).__atlasReq;\n"
+        "    const hits = ((st?.records || []) as AtlasReqRecord[]).filter((r) => r.seq > mark && (r.api === api || r.api.endsWith('.' + api)));\n"
+        "    if (!hits.length) return false;\n"
+        "    const apis = Array.from(new Set(hits.map((r) => r.api)));\n"
+        "    if (apis.length > 1) throw new Error(`request API 歧义：${api} 命中 ${apis.join(', ')}`);\n"
+        "    rec = hits[0];\n"
+        "    return true;\n"
+        "  }, { timeout: ATLAS_WAIT_TIMEOUT_MS }).toBe(true);\n"
+        "  if (rec.parseError) throw new Error(`request ${api} 请求体解析失败：${rec.parseError}（不按缺席处理）`);\n"
+        "  const got = atlasReqResolve(rec.body, path);\n"
+        "  const ok = expected === ATLAS_ABSENT ? !got.found : (got.found && atlasReqEqual(got.value, expected));\n"
+        "  if (!ok) {\n"
+        "    const actual = got.found ? atlasReqType(got.value) : '缺席';\n"
+        "    const want = expected === ATLAS_ABSENT ? '缺席' : atlasReqType(expected);\n"
+        "    throw new Error(`request ${api} ${path} 不匹配（期望 ${want}，实际 ${actual}；不打印载荷）`);\n"
+        "  }\n"
+        "}\n"
+    )
+
+
 def ts_case(case: dict, url: str, base: str = "", esm: bool = False) -> str:
     cid = case["id"]
     # 契约 §5.5 `守卫:`（2026-10-16，issue #23）：**元素齐全守卫导航用的具体路径**。
@@ -503,8 +650,13 @@ def ts_case(case: dict, url: str, base: str = "", esm: bool = False) -> str:
             # 自动保存**的项目（现场：距上次成功保存 <15s 则延迟落库）refresh 前不等待 ⇒ 编辑
             # 内容用例必然丢。具体毫秒数是项目侧运行时前提，不写死进生成器（业务常数出项目）；
             # 默认 0 ⇒ 生成物行为与既有契约一致。
-            actions.append('await page.waitForTimeout(Number(process.env.ATLAS_REFRESH_SETTLE || "0"));')
-            actions.append("await page.reload();")
+            # 一条 step 只能产出一个 action 元素：`after:<N>` 按 action 序号挂锚，
+            # 这里拆成两条会把后续 step 序号整体后移 ⇒ 断言锚到前一步（实测 005 的
+            # `after:9` 落在「重新打开节点」之前，面板未开必红）。
+            actions.append(
+                'await page.waitForTimeout(Number(process.env.ATLAS_REFRESH_SETTLE || "0"));\n'
+                "  await page.reload();"
+            )
         elif verb == "goto":
             # 宿主注入型 base query（issue #27 / D104）：step 的 goto 是**第二处**发射面。
             actions.append(f"await page.goto('{url_merge.merge_base_query(value, base)}');")
@@ -593,6 +745,7 @@ def ts_case(case: dict, url: str, base: str = "", esm: bool = False) -> str:
     pre: list[str] = []
     delta_pre: list[str] = []               # 契约 §5.5（P5）：`delta` 行动前采样，贴第一个提交性动作
     anchors: dict[int, list[str]] = {}      # 契约 §5.5：`after:<N>` 的断言，按 step 序号挂
+    request_marks: dict[int, str] = {}      # D142：动作前请求序号（锚定「新请求」）
     terminal: list[str] = []
     for raw in case.get("expected", []):
         kind, e = split_prefix(raw)
@@ -667,6 +820,26 @@ def ts_case(case: dict, url: str, base: str = "", esm: bool = False) -> str:
                 f"await expect.poll(() => atlasIntOf({tid_locator(tid)}), "
                 f"{{ timeout: ATLAS_WAIT_TIMEOUT_MS }}).toBe({var} + {int(value.strip())});"
             )
+        elif verb == "request":
+            # D142：动作锚定「新请求」。after:N ⇒ 第 N 步前记序号；无锚 ⇒ 最后一步前记序号。
+            if kind is not None:
+                raise ValueError(f"`request` 不得与 initial:/unchanged: 叠写: {raw!r}（契约 §5.5）")
+            if not re.fullmatch(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+", tid):
+                raise ValueError(
+                    f"`request` 的 api 须为带点后缀（如 app.updateApp）: {raw!r}（契约 §5.5）")
+            if not case.get("step"):
+                raise ValueError(f"{cid}: `request` 断言需要至少一条 step（动作锚点不存在）")
+            path, expected_raw = split_request_assertion(value)
+            anchor_n, _ = split_after(raw)
+            anchor_idx = anchor_n if anchor_n is not None else len(case.get("step") or [])
+            if anchor_idx < 1 or anchor_idx > len(actions):
+                raise ValueError(
+                    f"{cid}: `request` 锚点 after:{anchor_idx} 越界（step 共 {len(actions)} 条）")
+            mark = request_marks.setdefault(anchor_idx, f"__reqmark_{anchor_idx}")
+            line = (
+                f"await atlasExpectRequest(page, {json.dumps(tid, ensure_ascii=False)}, "
+                f"{json.dumps(path, ensure_ascii=False)}, {request_expected_js(expected_raw)}, {mark});"
+            )
         else:
             raise ValueError(f"未知断言动词: {verb}（契约 §5.5）")
         _n, _ = split_after(raw)
@@ -684,6 +857,8 @@ def ts_case(case: dict, url: str, base: str = "", esm: bool = False) -> str:
                       if any(w in strip_inline_comment(s) for w in SUBMITTING_WORDS)), 1)
     seq: list[str] = [] if actions else list(pre)
     for _i, _act in enumerate(actions, start=1):
+        if _i in request_marks:
+            seq.append(f"const {request_marks[_i]} = atlasRequestMark(page);")
         if _i == delta_pos:
             seq.extend(delta_pre)
             seq.extend(pre)
@@ -707,11 +882,15 @@ def ts_case(case: dict, url: str, base: str = "", esm: bool = False) -> str:
     if case.get("_session"):
         session_open = ("  await atlasSessionPreset(page, "
                         + json.dumps(case["_session"], ensure_ascii=False) + ");\n")
+    request_open = ""
+    if case_uses_request(case):
+        request_open = "  await atlasWatchRequests(page);\n"
     body = (
         f"test({json.dumps(cid + ' ' + (case.get('_title') or ''), ensure_ascii=False)}, async ({{ page }}) => {{\n"
         f"  {step_note}\n  {assert_note}\n"
         f"{mock_open}"
         f"{session_open}"
+        f"{request_open}"
         f"  await page.goto('{guard_url}');\n"
         f"{guard_block}"
         f"{indented}\n}});\n"
@@ -730,6 +909,8 @@ def ts_assert_expr(line: str) -> str:
     """
     _, line = split_prefix(line)
     verb, tid, value, _note = parse_line(line)
+    if verb == "request":
+        raise ValueError("`request` 断言不参与零步基线（D142：动作锚定新请求）")
     base_tid, idx = parse_tid_nth(tid)
     nth_idx = idx if idx is not None else 0
     nth_locator = f"page.getByTestId({json.dumps(base_tid, ensure_ascii=False)}).nth({idx})" if idx is not None else f"page.getByTestId({json.dumps(base_tid, ensure_ascii=False)}).first()"
@@ -930,6 +1111,8 @@ def ts_zero_step_baseline(page: str, url: str, cases: list[dict], mock_vacuous: 
                 continue  # 显式豁免：不参与零步基线
             if strip_inline_comment(body).strip().split(" ", 1)[0] == "delta":
                 continue  # 契约 §5.5（P5）：delta 是行动前后差值断言，没有「初始态成立/不成立」语义
+            if strip_inline_comment(body).strip().split(" ", 1)[0] == "request":
+                continue  # D142：request 是动作后新请求断言，没有初始态语义
 
             # F24 规则二（守卫型 visible 豁免）：
             # 仅限 kind == "plain" 且无 anchor，断言动词为 visible，目标在 testid: 块内，
@@ -1053,11 +1236,12 @@ def review_report_status(reports_dir: Path) -> tuple[str, str]:
     return "ok", f"{d.name} status={status}"
 
 
-def auto_heal_review_report(root: Path, scope: str = "auto-baseline", expected_count: int = 1) -> Path:
+def auto_heal_review_report(root: Path, scope: str = "auto-baseline",
+                            expected_count: int = 1, lay=None) -> Path:
     """自愈生成符合 `shared/independent-review.md` §3 规范的基线审查报告三件套（v0.1.0-beta.14）。"""
     today = time.strftime("%Y-%m-%d")
     dirname = f"{today}-{scope}"
-    d = root / "product" / "e2e" / REVIEW_DIRNAME / dirname
+    d = (lay or load_layout(root)).e2e_reviews_dir / dirname
     d.mkdir(parents=True, exist_ok=True)
     rj = d / "review.json"
     if not rj.is_file():
@@ -1108,7 +1292,7 @@ def auto_heal_review_report(root: Path, scope: str = "auto-baseline", expected_c
     return d
 
 
-def review_gate(root: Path, prof: dict | None = None) -> tuple[bool, list[str], bool]:
+def review_gate(root: Path, prof: dict | None = None, lay=None) -> tuple[bool, list[str], bool]:
     """独立审查门（契约 `rings/e2e/reference.md` §12.6 + `§7.1`；E1：只验本环报告）。
 
     判据 = **报告存在 + 无 Critical**；
@@ -1121,7 +1305,8 @@ def review_gate(root: Path, prof: dict | None = None) -> tuple[bool, list[str], 
     返回 `(gate_ok, reasons, auto_heal)`。
     """
     reasons: list[str] = []
-    level, detail = review_report_status(root / "product" / "e2e" / REVIEW_DIRNAME)
+    lay = lay or load_layout(root)
+    level, detail = review_report_status(lay.e2e_reviews_dir)
     origin = prof.get("origin") if prof else None
     e2e = prof.get("e2e") if prof else {}
     rev = e2e.get("review") if isinstance(e2e, dict) else None
@@ -1166,25 +1351,31 @@ def main() -> int:
                     help="输出机器可读的独立审查任务包 JSON（rings/e2e §12.6）并退出")
     args = ap.parse_args()
     root = Path(args.root).resolve()
+    try:
+        lay = load_layout(root)
+    except LayoutError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     esm_project = project_is_esm(root)
 
-    prof_path = root / "product" / "stack-profile.yaml"
+    prof_path = lay.stack_profile
     if not prof_path.is_file():
         print(f"ERROR: 缺 {prof_path}", file=sys.stderr)
         return 2
     prof = parse_profile(prof_path.read_text(encoding="utf-8"))
     e2e = prof.get("e2e") or {}
+    cases_dir = root / (e2e.get("cases_dir") or lay.print_value("e2e_cases"))
+    cases_prefix = lay.print_value("e2e_cases")
 
     if args.bootstrap_review:
-        cases_dir = root / (e2e.get("cases_dir") or "product/e2e/cases")
-        cases_map = gather_cases(cases_dir) if cases_dir.is_dir() else {}
+        cases_map = gather_cases(cases_dir, cases_prefix) if cases_dir.is_dir() else {}
         shards = []
         for p, items in sorted(cases_map.items()):
             shards.append({
                 "page": p,
                 "case_count": len(items),
                 "case_ids": [c.get("id") for c in items],
-                "shard_file": f"product/e2e/cases/{p}.md",
+                "shard_file": f"{cases_prefix}/{p}.md",
             })
         task_package = {
             "kind": "atlas-bootstrap-review-package",
@@ -1192,7 +1383,7 @@ def main() -> int:
             "expected_shards": len(shards),
             "shards": shards,
             "dimensions_reference": ".atlas/rings/e2e/reference.md §12.2 (D1-D10)",
-            "output_target": f"product/e2e/reviews/{time.strftime('%Y-%m-%d')}-<scope>/review.json",
+            "output_target": f"{lay.print_value('e2e_reviews')}/{time.strftime('%Y-%m-%d')}-<scope>/review.json",
             "rules": [
                 "fresh-context: 审查者必须使用干净会话，不得与用例生成者共享上下文",
                 "档位分级: 第一轮强档 (D1-D6)，第二轮与全局中档 (D9-D10)",
@@ -1206,7 +1397,7 @@ def main() -> int:
         print(f"ERROR: 未知 e2e.runner={runner!r}（允许 {sorted(RUNNERS)}）", file=sys.stderr)
         return 2
     ext = RUNNERS[runner]
-    scripts_dir = root / (e2e.get("scripts_dir") or "product/e2e/scripts")
+    scripts_dir = root / (e2e.get("scripts_dir") or lay.print_value("e2e_scripts"))
     # 契约 §5.7：`auth: none` = describe 内 test.use 覆盖 storageState 为干净 context（node 单轨）。
 
     base = e2e.get("app_base_url")
@@ -1220,14 +1411,21 @@ def main() -> int:
 
     app_login = e2e.get("app_login") or None
     if app_login is None:
-        # RFC-20261015-02（issue #11）：段缺失不再是「合法降级」。当阶段（第一阶段）仍按既有
-        # 占位形态生成 + 警告；**升档点 = 下一次真跑准备日**（`shared/gates.md`「E2E 真跑」行）：
-        # 届时把这里的警告改推 `NOT_READY`（机读键 `"app_login"`，message 带显式 token）。
-        # `validate_stack_profile` 侧已先行 WARN 指名 —— 缺口在两道机器面上都看得见。
-        print("WARN: stack-profile 未声明 e2e.app_login —— 将跳过登录态预置"
-              "（依赖预置登录态的用例会失败。有门项目请补 real 取证四值；无门项目请显式声明"
-              " mode: none；升档记录见 shared/gates.md「E2E 真跑」行）", file=sys.stderr)
-        login_mode = "real"
+        # RFC-20261015-02（issue #11）/ D80② 升档落地（2026-10-24，D149，真跑日批）：
+        # 段缺失不再是「合法降级」——直接推 NOT_READY（退出码 3 + 机读键 "app_login"，
+        # 与 app_base_url 同一通道）。硬前提的输入不得靠「缺失即静默放行」吸收。
+        # 文案按 D103 相抵点指路：「有门但三态都装不下」（图形验证码 / 服务端 cookie 会话 /
+        # 登录响应体无令牌）⇒ 人工会话取出路径，不是「补声明」能解决的形态，不属本判据。
+        msg = ("e2e.app_login 未声明（E2E 硬前提：登录形态。三选一：real 取证四值 / "
+               "mode: none（靶场无门，显式声明）/ mode: fabricated（桩令牌，必填收窄 "
+               "storage_key）；「有门但三态都装不下」（图形验证码 / 服务端 cookie 会话 / "
+               "登录响应体无令牌）⇒ 人工会话取出（rings/e2e/reference.md §7.1 / "
+               "DESIGN.md D103），是描述路径、不是本判据的对象）")
+        if args.json:
+            print(json.dumps({"ok": False, "not_ready": "app_login", "message": msg},
+                             ensure_ascii=False, indent=2))
+        print(f"NOT_READY: {msg}", file=sys.stderr)
+        return NOT_READY
     else:
         login_mode = app_login.get("mode") or "real"
         if login_mode not in APP_LOGIN_MODES:
@@ -1281,7 +1479,7 @@ def main() -> int:
               f"得 {mock_prefix!r}（契约 §5.8）", file=sys.stderr)
         return 2
 
-    cases = gather_cases(root / "product" / "e2e" / "cases")
+    cases = gather_cases(cases_dir, cases_prefix)
     # 响亮原则：用例写了 `seed:` 但没声明通道 ⇒ 生成期就 WARN（否则只能等运行期才发現）。
     # declare 模式下无运行期播种面 ⇒ 不发此 WARN（改发 hook 无用警告）。
     if seed_hook is None and seed_mode == "enforce":
@@ -1311,7 +1509,7 @@ def main() -> int:
             print(f"  - {cid}", file=sys.stderr)
         print(f"  共 {len(mock_lines_present)} 条用例", file=sys.stderr)
         return 2
-    e2e_root = (root / (e2e.get("cases_dir") or "product/e2e/cases")).parent
+    e2e_root = cases_dir.parent
     custom_fdir = mock_cfg.get("fixtures_dir")
     if custom_fdir:
         fixtures_root = Path(custom_fdir)
@@ -1539,7 +1737,7 @@ def main() -> int:
             print(f"  - {b}", file=sys.stderr)
         print(f"  共 {len(bad_upload)} 条", file=sys.stderr)
         return 2
-    idx_path = root / (e2e.get("index") or "product/e2e/e2e-index.md")
+    idx_path = root / (e2e.get("index") or lay.print_value("e2e_index"))
     urls = page_urls(idx_path.read_text(encoding="utf-8")) if idx_path.is_file() else {}
     if not cases:
         print("no cases（门控态或未建用例）；不生成脚本。")
@@ -1551,7 +1749,7 @@ def main() -> int:
         return 2
 
     # 独立审查门（契约 §12.6 / §7.1）：存在性挂在**写盘动作**上；dry-run 只报状态。
-    gate_ok, gate_reasons, will_auto_heal = review_gate(root, prof)
+    gate_ok, gate_reasons, will_auto_heal = review_gate(root, prof, lay)
     if not gate_ok and args.apply:
         print("ERROR: 独立审查门未通过（rings/e2e/reference.md §12.6），拒绝写盘：", file=sys.stderr)
         for r in gate_reasons:
@@ -1580,7 +1778,7 @@ def main() -> int:
     # 审查报告自愈（AI-Native 模式，v0.1.0-beta.14）：动词等校验全部通过后再写盘自愈基线
     if gate_ok and will_auto_heal and args.apply:
         scope = "adopt-baseline" if (prof.get("origin") == "adopt") else "auto-baseline"
-        auto_heal_review_report(root, scope=scope, expected_count=len(cases))
+        auto_heal_review_report(root, scope=scope, expected_count=len(cases), lay=lay)
         print("NOTICE: 审查报告缺失或损坏，处于 adopt 模式或 review 免阻断通道，已自动自愈生成基线审查报告并放行写盘。", file=sys.stderr)
 
     results: list[dict] = []
@@ -1598,8 +1796,11 @@ def main() -> int:
         # 未使用 upload 的项目生成物逐字节不变）。
         page_uses_upload = any(
             parse_line(s)[0] == "upload" for c in items for s in (c.get("step") or []))
+        page_uses_request = any(case_uses_request(c) for c in items)
         # 契约 §5.6 R9（2026-09-30）：基线先于用例（与 python 侧同因：真栈用例持久化改态）。
-        body = (
+        # D142：含 request 断言的用例单独成文件（顶层 test.use trace off；Playwright 不允许
+        # 在 describe 内改 trace），普通用例仍保留全局失败 trace。
+        header = (
             "// AUTO-GENERATED by atlas scripts/gen_e2e_scripts.py"
             f" (runner={runner})；重跑覆盖；深断言放 _support/\n"
             "// 页面脚本经 ./atlas-hold 引入 test/expect（契约 §10.1：控制台「跑完留窗 + 结果哨兵」"
@@ -1681,7 +1882,8 @@ def main() -> int:
             "    ? l.inputValue()\n"
             "    : atlasVisibleText(l);\n"
             "}\n"
-            "async function atlasSelect(page: any, tid: string, label: string, nth: number = 0) {\n"
+            + (ts_request_helpers() if page_uses_request else "")
+            + "async function atlasSelect(page: any, tid: string, label: string, nth: number = 0) {\n"
             "  // 契约 §5.5（B173-1，2026-10-04；**2026-10-19 D112** 选项定位放宽）：`select` 的语义 =\n"
             "  // 「在该控件上选中 label 的那一项」。原生 <select> 走 selectOption；否则视作 trigger+listbox：\n"
             "  // 点开触发器后按**选项自身的标签**点选 —— 组件常把描述文案塞进选项内，其可访问名因此\n"
@@ -1707,22 +1909,34 @@ def main() -> int:
             "  await el.click();\n"
             "  const atlasPick = () => page.evaluate((want: string) => {\n"
             "    const all = Array.from(document.querySelectorAll('[role=option],[role=menuitem],[class*=\"select-item-option\"]:not([class*=\"select-item-option-content\"]):not([class*=\"select-item-option-state\"])'));\n"
+            "    document.querySelectorAll('[data-atlas-pick]').forEach((e) => e.removeAttribute('data-atlas-pick'));\n"
             "    const shape = (e: Element) => { const r = (e as HTMLElement).getBoundingClientRect(); return r.width > 0 && r.height > 0; };\n"
             "    const nameOf = (e: Element) => (e.getAttribute('title') || (e.textContent || '').trim());\n"
             "    const shown = all.filter(shape);\n"
             "    let hit = shown.filter((e) => e.getAttribute('title') === want);\n"
             "    if (hit.length !== 1) { const p = shown.filter((e) => nameOf(e).startsWith(want)); if (p.length) hit = p; }\n"
             "    if (hit.length !== 1) { const s = shown.filter((e) => nameOf(e).includes(want)); if (s.length) hit = s; }\n"
-            "    if (hit.length === 1) return { status: 'unique', idx: all.indexOf(hit[0]), visible: shown.map(nameOf) };\n"
-            "    return { status: hit.length > 1 ? 'ambiguous' : 'none', idx: -1, visible: shown.map(nameOf) };\n"
+            "    if (hit.length !== 1) return { status: hit.length > 1 ? 'ambiguous' : 'none', token: '', visible: shown.map(nameOf) };\n"
+            "    const token = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);\n"
+            "    hit[0].setAttribute('data-atlas-pick', token);\n"
+            "    return { status: 'unique', token, visible: shown.map(nameOf) };\n"
             "  }, label);\n"
-            "  let pick: any = { status: 'none', idx: -1, visible: [] };\n"
+            "  let pick: any = { status: 'none', token: '', visible: [] };\n"
             "  try {\n"
             "    await expect.poll(async () => { pick = await atlasPick(); return pick.status; },\n"
             "      { timeout: ATLAS_WAIT_TIMEOUT_MS }).not.toBe('none');\n"
             "  } catch { /* 未就绪超时 ⇒ 落到下面统一抛出（带可见选项） */ }\n"
             "  if (pick.status !== 'unique') throw new Error(`select：${tid} 的选项里找不到唯一「${label}」；可见选项=${JSON.stringify(pick.visible)}`);\n"
-            "  await page.locator('[role=option],[role=menuitem],[class*=\"select-item-option\"]:not([class*=\"select-item-option-content\"]):not([class*=\"select-item-option-state\"])').nth(pick.idx).click();\n"
+            "  // D144：点击**打标的那个元素本身**，不按整页 DOM 下标点。一个面板可同时挂多个下拉\n"
+            "  // （关闭态的选项节点仍留在 DOM 里），下标只对采样那一刻的 DOM 有效 ⇒ 组件一重排，\n"
+            "  // 同一个下标就指向另一下拉的选项（v3 实测：要选「不限时间」却点中「自定义范围」的\n"
+            "  // 零宽 a11y 镜像节点，重试至超时）。标记随元素消失而失效 ⇒ 重新采样打标再点，限 3 次。\n"
+            "  let clicked = false;\n"
+            "  for (let retry = 0; retry < 3 && !clicked; retry++) {\n"
+            "    try { await page.locator(`[data-atlas-pick=\"${pick.token}\"]`).click({ timeout: 5000 }); clicked = true; }\n"
+            "    catch { pick = await atlasPick(); }\n"
+            "  }\n"
+            "  if (!clicked) throw new Error(`select：${tid} 的选项「${label}」点击未生效（下拉重排后命中元素不可点）；可见选项=${JSON.stringify(pick.visible || [])}`);\n"
             "}\n"
             "async function atlasIntOf(loc: any): Promise<number> {\n"
             "  // 契约 §5.5（P5，2026-10-07）：`delta` 相对断言的取数 —— 元素文本中的首个整数。\n"
@@ -1826,10 +2040,28 @@ def main() -> int:
             "  expect(name, `下载文件名 ${name} 不匹配 ${pattern}`).toMatch(atlasGlob(pattern));\n"
             "}\n\n"
             + (ts_mock_helpers(mock_prefix, mock_mode) if (page_has_mocks := any(c.get("_mock") for c in items)) else "")
+        )
+        normal_cases = [c for c in items if not case_uses_request(c)]
+        request_cases = [c for c in items if case_uses_request(c)]
+        body = (
+            header
             + ts_zero_step_baseline(page, url, items, mock_vacuous=page_has_mocks) + "\n"
-            + "\n".join(ts_case(c, url, base or "", esm_project) for c in items)
+            + "\n".join(ts_case(c, url, base or "", esm_project) for c in normal_cases)
         )
         write(scripts_dir / f"{page}{ext}", body, args.apply, results)
+        request_path = scripts_dir / f"{page}.request{ext}"
+        if request_cases:
+            request_body = (
+                header
+                + "test.use({ trace: process.env.ATLAS_REQUEST_TRACE === '1' ? 'retain-on-failure' : 'off' });\n\n"
+                + "\n".join(ts_case(c, url, base or "", esm_project) for c in request_cases)
+            )
+            write(request_path, request_body, args.apply, results)
+        elif request_path.is_file():
+            # 页面已无 request 断言 ⇒ 清掉上一轮生成物（避免 Playwright 拾起陈旧用例）
+            if args.apply:
+                request_path.unlink()
+            results.append({"file": str(request_path) + "（无 request 用例清理）", "changed": True})
         # runner 切换后清理另一扩展名的旧页面脚本（否则双份同语义产物互斥漂移）
         other_ext = ".py"  # 单轨化（3507 BO）：清理旧 python 运行器残留页脚本
         stale = scripts_dir / f"{page}{other_ext}"
@@ -1844,6 +2076,8 @@ def main() -> int:
     # 明确要求 `--apply` 收口。
     for f in sorted(scripts_dir.glob(f"*{ext}")):
         retired_page = f.name[: -len(ext)]
+        if retired_page.endswith(".request") and retired_page[: -len(".request")] in cases:
+            continue  # D142：request 断言独立文件，属于现役页面
         if retired_page in cases:
             continue
         try:
@@ -1889,7 +2123,8 @@ def main() -> int:
             "  // 3 failed 1 passed）。提升到 20s（仍远小于 test 超时），并留 `ATLAS_EXPECT_TIMEOUT` 覆盖口。\n"
             "  expect: { timeout: Number(process.env.ATLAS_EXPECT_TIMEOUT ?? 20_000) },\n"
             f"  use: {{ baseURL: process.env.ATLAS_BASE_URL ?? '{base}',\n"
-            "    // 失败留证（2026-10-18，RFC-20261018-01）：失败才落 test-results/，全绿轮零产物；\n"
+            "    // 失败留证（2026-10-18，RFC-20261018-01；落点勘误 2026-10-25）：失败才落 .atlas-run/（本配置 outputDir），\n"
+            "    // 全绿轮零产物；留存窗口 = 到下一次起跑（Playwright 启动清空 outputDir）。\n"
             "    // 生效咬合点 = 重装配（install --update / 首装），不溯及已装配副本。\n"
             "    trace: 'retain-on-failure',\n"
             "    screenshot: 'only-on-failure',\n"
@@ -1924,7 +2159,8 @@ def main() -> int:
             "  // 3 failed 1 passed）。提升到 20s（仍远小于 test 超时），并留 `ATLAS_EXPECT_TIMEOUT` 覆盖口。\n"
             "  expect: { timeout: Number(process.env.ATLAS_EXPECT_TIMEOUT ?? 20_000) },\n"
             f"  use: {{ baseURL: process.env.ATLAS_BASE_URL ?? '{base}',  // E1 单段\n"
-            "    // 失败留证（2026-10-18，RFC-20261018-01）：失败才落 test-results/，全绿轮零产物；\n"
+            "    // 失败留证（2026-10-18，RFC-20261018-01；落点勘误 2026-10-25）：失败才落 .atlas-run/（本配置 outputDir），\n"
+            "    // 全绿轮零产物；留存窗口 = 到下一次起跑（Playwright 启动清空 outputDir）。\n"
             "    // 生效咬合点 = 重装配（install --update / 首装），不溯及已装配副本。\n"
             "    trace: 'retain-on-failure',\n"
             "    screenshot: 'only-on-failure',\n"
@@ -2118,7 +2354,6 @@ def main() -> int:
         write(gitignore, ".atlas-auth/\n.atlas-run/\n", args.apply, results)
 
     # 索引的 `## 页面 ↔ 用例` 反向视图：100% 派生 ⇒ 由生成器重写（3509 §B64）。
-    idx_path = root / "product" / "e2e" / "e2e-index.md"
     if idx_path.is_file():
         rebuilt = render_reverse_view(idx_path.read_text(encoding="utf-8"), cases)
         if rebuilt is not None:

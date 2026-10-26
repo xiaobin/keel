@@ -145,6 +145,20 @@ def compute_next_beta_version(explicit_version: str | None = None) -> str:
     dist_tags = get_npm_dist_tags()
     npm_ver = dist_tags.get("latest") or dist_tags.get("beta") or ""
 
+    # 2026-10-25 加固(beta.9 空号教训:三源瞬时不一致 ⇒ 顺延跳号,npm 不可补):
+    # 真相源升级 = registry versions **全集**语义最大,再对 next 做防撞兜底。
+    registry_versions: list[str] = []
+    try:
+        res = run_cmd(
+            f"npm view {PKG_NAME} versions --json", check=False, use_proxy=False
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            data = json.loads(res.stdout)
+            if isinstance(data, list):
+                registry_versions = [v for v in data if isinstance(v, str)]
+    except Exception:
+        pass
+
     pkg_json_path = ROOT_DIR / "package.json"
     pkg_ver = ""
     if pkg_json_path.exists():
@@ -169,10 +183,22 @@ def compute_next_beta_version(explicit_version: str | None = None) -> str:
     major, minor, patch, pre, pre_num = parse_semver(highest_ver_str)
     if pre:
         next_pre_num = pre_num + 1
-        return f"{major}.{minor}.{patch}-{pre}.{next_pre_num}"
+        candidate = f"{major}.{minor}.{patch}-{pre}.{next_pre_num}"
     else:
         # 如果当前是非 prerelease，默认进入下一个 minor beta
-        return f"{major}.{minor + 1}.0-beta.1"
+        candidate = f"{major}.{minor + 1}.0-beta.1"
+
+    # 防撞兜底:候选若已在 registry versions 全集里 ⇒ 顺延直至空位(跳号不可逆,撞号即 E409)
+    existing = set(registry_versions)
+    guard = 0
+    while candidate in existing and guard < 100:
+        major_, minor_, patch_, pre_, num_ = parse_semver(candidate)
+        if pre_:
+            candidate = f"{major_}.{minor_}.{patch_}-{pre_}.{num_ + 1}"
+        else:
+            candidate = f"{major_}.{minor_ + 1}.0-beta.1"
+        guard += 1
+    return candidate
 
 
 def sync_version_files(new_version: str, dry_run: bool = False) -> list[str]:
@@ -221,6 +247,26 @@ def sync_version_files(new_version: str, dry_run: bool = False) -> list[str]:
         modified.append("docs/.vitepress/config.mts")
         if not dry_run:
             vite_path.write_text(new_vite_text, encoding="utf-8")
+
+    # 5. docs/map/index.md 锚定版本 + atlas-map.html 版本串（2026-10-25 补，beta.8 漏刷教训：
+    #    map 锚门「始终最新」会咬发版——版本同步面必须含 docs/map 两个落点）
+    map_idx = ROOT_DIR / "docs" / "map" / "index.md"
+    if map_idx.is_file():
+        t = map_idx.read_text(encoding="utf-8")
+        nt = re.sub(r"(v\d+\.\d+\.\d+-beta\.\d+)", f"v{new_version}", t, count=0) if False else re.sub(
+            r"v\d+\.\d+\.\d+-beta\.\d+", f"v{new_version}", t)
+        if nt != t:
+            modified.append("docs/map/index.md")
+            if not dry_run:
+                map_idx.write_text(nt, encoding="utf-8")
+    map_html = ROOT_DIR / "docs" / "map" / "atlas-map.html"
+    if map_html.is_file():
+        t = map_html.read_text(encoding="utf-8")
+        nt = re.sub(r"v\d+\.\d+\.\d+-beta\.\d+", f"v{new_version}", t)
+        if nt != t:
+            modified.append("docs/map/atlas-map.html")
+            if not dry_run:
+                map_html.write_text(nt, encoding="utf-8")
 
     # 4. CHANGELOG.md (收拢 [Unreleased] 为 [vX.Y.Z])
     changelog_path = ROOT_DIR / "CHANGELOG.md"
@@ -355,6 +401,22 @@ def cmd_release(target_version: str | None = None, auto: bool = False, dry_run: 
     # 3. 版本同步
     print(f"\n📝 正在同步版本号到 {next_ver}...")
     mod_files = sync_version_files(next_ver, dry_run=dry_run)
+    # 2026-10-25 加固(beta.8 教训:并行会话在途改动被 chore 卷入发布):版本落点同步后,
+    # 工作树里若还有「版本落点之外」的未提交改动 ⇒ 拒绝发版(等维护者分流)。
+    if not dry_run:
+        dirty_out = run_cmd("git status --porcelain", use_proxy=False).stdout
+        mod_set = {m.split(" → ")[-1].strip() for m in mod_files}
+        strays = []
+        for line in dirty_out.splitlines():
+            path = line[3:].strip().strip('"')
+            if path and path not in mod_set:
+                strays.append(path)
+        if strays:
+            raise RuntimeError(
+                "工作树存在版本落点之外的未提交改动(会被卷入发版 chore)——请先分流:\n  "
+                + "\n  ".join(strays[:10])
+                + ("\n  …" if len(strays) > 10 else ""))
+
     if mod_files:
         print(f"  已更新版本落点文件: {', '.join(mod_files)}")
     else:

@@ -139,6 +139,10 @@ def spec_of(root: Path, page: str = "home") -> str:
     return (root / "product" / "e2e" / "scripts" / f"{page}.spec.ts").read_text(encoding="utf-8")
 
 
+def request_spec_of(root: Path, page: str = "home") -> str:
+    return (root / "product" / "e2e" / "scripts" / f"{page}.request.spec.ts").read_text(encoding="utf-8")
+
+
 def zs_probes(spec_text: str, page: str = "home") -> list[dict]:
     """抽出页面脚本内联的零步基线清单（`const ATLAS_ZS_<page> = {...}`）并解析。"""
     m = re.search(rf"const ATLAS_ZS_{page} = (\{{.*?\}});\n", spec_text, re.S)
@@ -902,6 +906,7 @@ ASSERT_SAMPLES = {
     "value": "home-cta-btn 首页",
     "attr": "home-cta-btn data-theme dark",
     "delta": "home-title +1",
+    "request": "app.updateApp Data.reqDTO.config.nodeParam.mailStatus (缺席)",
 }
 
 
@@ -1087,6 +1092,146 @@ function node({ text = "", opacity = 1, children = [] } = {}) {
     assert got["value"] == got["label"], f"隐藏的 a11y 播报被计入 value：{got}"
     assert got["restored"] == "opacity: 0;", f"采值后未恢复隐藏节点原始 style：{got}"
     assert got["hidden"] is False, f"采值后隐藏节点仍处于 display:none：{got}"
+
+
+def test_request_assertion_emits_action_anchored_watcher_and_trace_off() -> None:
+    """D142：`request` 断言必须「动作锚定新请求」——watcher 先于首屏 goto，序号采样
+    先于锚定 step；并默认关闭 trace（`ATLAS_REQUEST_TRACE=1` 才保留失败 trace）。
+    """
+    case = CASE.replace(
+        "  - click home-cta-btn          # 点击主操作按钮\n",
+        "  - click home-cta-btn          # 点击主操作按钮\n"
+        "  - click home-title            # 保存\n",
+    ).replace(
+        "  - text home-title 首页        # 页面标题文案为「首页」",
+        "  - after:2 request app.updateApp Data.reqDTO.config.nodeParam.mailStatus (缺席)  # 字段缺席",
+    )
+    assert "after:2 request" in case
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        make(root, case=case)
+        assert run(root, "--apply").returncode == 0
+        text = request_spec_of(root)
+    # request 用例独立文件：顶层 test.use 关 trace（describe 内不允许改 trace）
+    assert "test.use({ trace: process.env.ATLAS_REQUEST_TRACE === '1'" in text, text
+    block = text[text.index('test("E2E-HOME-001'):]
+    assert "await atlasWatchRequests(page);" in block, block
+    assert block.index("await atlasWatchRequests(page);") < block.index("page.goto("), block
+    # 序号采样必须早于锚定动作（第 2 步 click home-title），断言在其后
+    mark = "__reqmark_2 = atlasRequestMark(page);"
+    click = "page.getByTestId('home-title').first().click"
+    assert block.index(mark) < block.index(click), block
+    assert block.index(click) < block.index("await atlasExpectRequest("), block
+    # trace 默认关闭；env 显式 opt-in
+    assert "ATLAS_REQUEST_TRACE === '1' ? 'retain-on-failure' : 'off'" in text, text
+    # 无 request 的页面不得出现 watcher/helper（零变化）
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        make(root)
+        assert run(root, "--apply").returncode == 0
+        plain = spec_of(root)
+    assert "atlasWatchRequests" not in plain, plain
+    assert "atlasExpectRequest" not in plain, plain
+
+
+def _request_helpers_js(text: str) -> str:
+    start = text.index("const ATLAS_ABSENT")
+    end = text.index("async function atlasSelect", start)
+    src = text[start:end]
+    src = re.sub(r"type AtlasReqRecord = .*?;\n", "", src)
+    for token in (": string | undefined", ": AtlasReqRecord[]", ": any", ": string",
+                  ": number", " as AtlasReqRecord[]", " as any"):
+        src = src.replace(token, "")
+    for token in ("): boolean", "): number", "): string", "): void"):
+        src = src.replace(token, ")")
+    return src
+
+
+def test_request_path_tristate_and_errors() -> None:
+    """D142：路径三态 —— 叶子缺失 = absent；null / 空串是**存在**的值；中间缺失、
+    过滤 0/多命中、数组越界 = 解析错误（不得当作缺席通过）。"""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node 不可用，跳过 request 路径求值")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        make(root, case=CASE.replace(
+            "  - text home-title 首页        # 页面标题文案为「首页」",
+            "  - request app.updateApp Data.a (缺席)  # 路径三态"))
+        assert run(root, "--apply").returncode == 0
+        text = spec_of(root)
+    src = _request_helpers_js(text)
+    script = """
+globalThis.ATLAS_WAIT_TIMEOUT_MS = 1;
+const factory = new Function(__SRC__ + "\\nreturn { atlasReqResolve, ATLAS_ABSENT };");
+const { atlasReqResolve } = factory();
+const body = { a: { b: null, c: "", list: [{ k: "x", v: 1 }, { k: "y", v: 2 }] } };
+const out = {};
+out.missingLeaf = atlasReqResolve(body, "a.nope");
+out.nullLeaf = atlasReqResolve(body, "a.b");
+out.emptyLeaf = atlasReqResolve(body, "a.c");
+try { atlasReqResolve(body, "a.nope.x"); out.midMissing = "no-throw"; } catch { out.midMissing = "throw"; }
+try { atlasReqResolve(body, "a.list[k=z].v"); out.filter0 = "no-throw"; } catch { out.filter0 = "throw"; }
+try { out.filter1 = atlasReqResolve(body, "a.list[k=x].v"); } catch { out.filter1 = "throw"; }
+try { atlasReqResolve(body, "a.list[9]"); out.oor = "no-throw"; } catch { out.oor = "throw"; }
+process.stdout.write(JSON.stringify(out));
+"""
+    script = script.replace("__SRC__", json.dumps(src, ensure_ascii=False))
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    got = json.loads(proc.stdout)
+    assert got["missingLeaf"] == {"found": False}, got
+    assert got["nullLeaf"] == {"found": True, "value": None}, got
+    assert got["emptyLeaf"] == {"found": True, "value": ""}, got
+    assert got["midMissing"] == "throw", got
+    assert got["filter0"] == "throw", got
+    assert got["filter1"] == {"found": True, "value": 1}, got  # a.list[k=x].v ⇒ 1
+    assert got["oor"] == "throw", got
+
+
+def test_request_action_anchored_new_request_and_tristate() -> None:
+    """D142：只认 mark 之后**新出现**的匹配请求；无新请求 ⇒ 失败；`(缺席)` 不吞 null；
+    解析错误不折叠为缺席。"""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node 不可用，跳过 request 断言求值")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        make(root, case=CASE.replace(
+            "  - text home-title 首页        # 页面标题文案为「首页」",
+            "  - request app.updateApp Data.a null  # 动作锚定"))
+        assert run(root, "--apply").returncode == 0
+        text = spec_of(root)
+    src = _request_helpers_js(text)
+    script = """
+globalThis.ATLAS_WAIT_TIMEOUT_MS = 1;
+globalThis.expect = { poll: (fn) => ({ toBe: async (want) => { const v = await fn(); if (v !== want) throw new Error("poll timeout"); } }) };
+const factory = new Function(__SRC__ + "\\nreturn { atlasExpectRequest, ATLAS_ABSENT };");
+const { atlasExpectRequest, ATLAS_ABSENT } = factory();
+const page = { __atlasReq: { records: [
+  { seq: 1, api: "zb.app.updateApp", body: { a: 1 } },
+  { seq: 2, api: "zb.app.updateApp", body: { a: null } },
+] } };
+(async () => {
+  const out = {};
+  try { await atlasExpectRequest(page, "app.updateApp", "a", null, 1); out.newPass = true; } catch (e) { out.newPass = String(e.message); }
+  try { await atlasExpectRequest(page, "app.updateApp", "a", 1, 1); out.oldIgnored = "no-throw"; } catch { out.oldIgnored = "throw"; }
+  try { await atlasExpectRequest(page, "app.updateApp", "a", null, 2); out.noNew = "no-throw"; } catch { out.noNew = "throw"; }
+  try { await atlasExpectRequest(page, "app.updateApp", "a", ATLAS_ABSENT, 1); out.absentVsNull = "no-throw"; } catch { out.absentVsNull = "throw"; }
+  page.__atlasReq.records.push({ seq: 3, api: "zb.app.updateApp", body: null, parseError: "bad" });
+  try { await atlasExpectRequest(page, "app.updateApp", "a", null, 2); out.parseError = "no-throw"; } catch { out.parseError = "throw"; }
+  process.stdout.write(JSON.stringify(out));
+})();
+"""
+    script = script.replace("__SRC__", json.dumps(src, ensure_ascii=False))
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    got = json.loads(proc.stdout)
+    assert got["newPass"] is True, got
+    assert got["oldIgnored"] == "throw", got  # seq1 是旧请求被忽略；seq2 值 null 对 1 必失配
+    assert got["noNew"] == "throw", got
+    assert got["absentVsNull"] == "throw", got  # null 是存在的值，不是缺席
+    assert got["parseError"] == "throw", got
 
 
 def test_download_renders_register_then_click() -> None:
@@ -1585,7 +1730,7 @@ def test_zero_step_probes_never_wait_for_attachment() -> None:
         spec = spec_of(root)
     m = _re.search(r"const ATLAS_ZS_home = (\{.*?\});\n", spec, _re.S)
     assert m, "未找到零步基线数据"
-    probes = _json.loads(m.group(1))["probes"]
+    probes = json.loads(m.group(1))["probes"]
     assert probes, "夹具应产出探针"
     exprs = [p["expr"] for p in probes]
     assert any("getAttribute(" in e for e in exprs), "夹具应包含 attr 探针"
@@ -1797,8 +1942,10 @@ def test_select_option_locating_is_label_based_and_rejects_ambiguity() -> None:
         # ③ 唯一性判据 + 响亮失败（列出可见选项，让下一次失败可诊断）
         #    必须锚定**整条判据语句**：`hit.length` 这个子串在降级两行里也出现，
         #    只查子串 ⇒ 摘掉判据行钉子照样绿（MB14 实测：第一版判据就是废的）。
-        #    （D117 起形态由 `ok:false` 改为三值 `status`；「歧义即拒 + 列出可见选项」意图不变）
-        assert "if (hit.length === 1) return { status: 'unique', idx: all.indexOf(hit[0]), visible: shown.map(nameOf) }" in body, body
+        #    （D117 起形态由 `ok:false` 改为三值 `status`；「歧义即拒 + 列出可见选项」意图不变。
+        #      D144 起唯一命中改为**给命中元素打标**返回 token，不再返回整页下标。）
+        assert "if (hit.length !== 1) return { status: hit.length > 1 ? 'ambiguous' : 'none', token: '', visible: shown.map(nameOf) }" in body, body
+        assert "return { status: 'unique', token, visible: shown.map(nameOf) }" in body, body
         assert "status: hit.length > 1 ? 'ambiguous' : 'none'" in body, body
         assert "可见选项=" in body, body
         # ④ 候选只取**几何可见**元素（避免 hidden 选项参与匹配）
@@ -1806,10 +1953,11 @@ def test_select_option_locating_is_label_based_and_rejects_ambiguity() -> None:
         # ⑤ 原生分支仍在（实现无关：<select> 走 selectOption）
         assert "selectOption({ label })" in body, body
         # ⑥ 候选集含组件库可见选项类名（D122：Antd Select 的可见项无 role=option，仅 title）
-        assert body.count('[class*="select-item-option"]') == 2, body
+        #    D144 起该选择器只在采样处出现一次（点击处已改用打标元素）
+        assert body.count('[class*="select-item-option"]') == 1, body
         # ⑦ 排除选项内部 -content / -state 子节点（否则无 title 时同一选项命中两次 ⇒ 假歧义）
-        assert body.count(':not([class*="select-item-option-content"])') == 2, body
-        assert body.count(':not([class*="select-item-option-state"])') == 2, body
+        assert body.count(':not([class*="select-item-option-content"])') == 1, body
+        assert body.count(':not([class*="select-item-option-state"])') == 1, body
 
 
 def test_select_polls_until_options_are_positioned_and_refuses_ambiguity() -> None:
@@ -1851,22 +1999,180 @@ def test_select_polls_until_options_are_positioned_and_refuses_ambiguity() -> No
         assert "selectOption({ label })" in body, body
 
 
-def test_setup_without_app_login_degrades_loudly() -> None:
-    """契约 §7.1（RFC-20261015-02，2026-10-16 改判）：stack-profile 未声明 e2e.app_login =
-    **未声明**（不再是「合法降级」）——第一阶段仍生成成功 + 生成期 WARN（升档 = 下一次真跑
-    准备日推 `not_ready`，记录见 `shared/gates.md`「E2E 真跑」行）；setup 以占位默认值发射
-    （凭据缺失 ⇒ 空 state + 警告，不发真实登录请求）。
+def test_select_clicks_the_marked_option_not_a_global_index() -> None:
+    """契约 §5.5（2026-10-23，`DESIGN.md` D144）：唯一命中后必须点**命中元素本身**，不得按整页 DOM 下标点。
+
+    现场（v3 测试环境真跑，全量 2/2 红、单跑 2/2 绿）：`select … 不限时间` 的点击解析成
+    `<div role="option" aria-label="自定义范围" id="rc_select_4_list_3">custom</div>`，重试
+    52 次「element is not visible」至 30s 超时。旧实现把命中元素在**整页** `[role=option]` 候选集里
+    的下标算出来再点击，而一个面板可同时挂多个下拉（关闭态的选项节点仍留在 DOM），组件重排后
+    同一数字指向别的最小项／零宽 a11y 镜像 ⇒ 静默点错。单跑时挂载节点少、下标恰好还对得上，
+    于是假绿 —— 顺序依赖，不是抖动。
+    """
+    case_text = CASE.replace(
+        "  - click home-cta-btn          # 点击主操作按钮",
+        "  - select home-cta-btn 首页    # 命中元素自身点击",
+    )
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        make(root, case=case_text)
+        assert run(root, "--apply").returncode == 0
+        ts = spec_of(root)
+        start = ts.index("async function atlasSelect(")
+        body = ts[start:ts.index("\nasync function ", start + 1)]
+        # ① 病灶必须消失：整页下标既不能算，也不能用
+        assert "all.indexOf" not in body, body
+        assert "pick.idx" not in body, body
+        assert ".nth(pick.idx)" not in body, body
+        # ② 命中元素打标 ⇒ 点击锚定该标记
+        assert "hit[0].setAttribute('data-atlas-pick', token)" in body, body
+        assert '[data-atlas-pick="${pick.token}"]' in body, body
+        # ③ 每次采样先清遗留标记（否则跨下拉多枚标记 ⇒ 选择器歧义，点击必挂）
+        assert "document.querySelectorAll('[data-atlas-pick]').forEach((e) => e.removeAttribute('data-atlas-pick'))" in body, body
+        # ④ 标记随元素失效 ⇒ 重新采样打标再点，且**有界**（不得无限重试）
+        assert "for (let retry = 0; retry < 3 && !clicked; retry++)" in body, body
+        assert "pick = await atlasPick();" in body, body
+        # ⑤ 有界重试仍失败 ⇒ 响亮失败（带选项与可见选项清单），不得静默通过
+        assert "点击未生效（下拉重排后命中元素不可点）" in body, body
+        # ⑥ 就绪轮询仍用 expect.poll，无固定等待
+        assert "await expect.poll(" in body, body
+        assert "waitForTimeout" not in body, body
+
+
+def test_select_click_hits_the_marked_option_across_a_virtualized_list() -> None:
+    """契约 §5.5（D144，2026-10-23）：行为钉 —— 从生成物抽出 `atlasSelect` 在 Node 里以假 DOM **真求值**。
+
+    构造现场：候选集共 26 个 option 节点，目标「不限时间」是**唯一几何可见**的命中项，但它在全局
+    候选集里的下标是 25；下标 20 处是另一个（关闭态）下拉留下的零宽 `role=option` 镜像「自定义范围」。
+    旧实现按全局下标点击 ⇒ 必然点中 20 号镜像（v3 现场正是这条路径）；新实现点打标元素本身 ⇒ 必须
+    点中「不限时间」。另跑一遍「首次点击时标记已随重排失效」的路径，证明确实走到重新采样再点。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        make(root)
+        assert run(root, "--apply").returncode == 0
+        text = spec_of(root)
+    m = re.search(r"async function atlasSelect\(page: any[\s\S]*?\n\}\n", text)
+    assert m, "未找到 atlasSelect 定义"
+    js_src = m.group(0)
+    for token in (": any", ": string", ": number", " as HTMLElement", "(e: Element)", "(want: string)"):
+        js_src = js_src.replace(token, "" if token.startswith(":") or token.startswith(" as ")
+                                 else token.replace("(e: Element)", "(e)").replace("(want: string)", "(want)"))
+    assert "pick.idx" not in js_src, js_src
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node 不可用，跳过 select 点击目标求值")
+    script = r"""
+function mk(title, visible) {
+  return {
+    title, visible, attrs: {}, textContent: title,
+    getAttribute(n) { return n === 'title' ? this.title : (this.attrs[n] === undefined ? null : this.attrs[n]); },
+    setAttribute(n, v) { this.attrs[n] = v; },
+    removeAttribute(n) { delete this.attrs[n]; },
+    getBoundingClientRect() { return this.visible ? { width: 120, height: 24 } : { width: 0, height: 0 }; },
+  };
+}
+function build() {
+  const opts = [];
+  for (let i = 0; i < 26; i++) opts.push(mk('占位' + i, false));
+  opts[20] = mk('自定义范围', false);          // 另一（关闭态）下拉的零宽 a11y 镜像
+  opts[25] = mk('不限时间', true);             // 唯一可见命中项，全局下标 25
+  opts[2] = mk('主题', true);                  // 同一面板另一个下拉的可见项（不该被点）
+  return opts;
+}
+const opts = build();
+const document = {
+  querySelectorAll(sel) {
+    if (sel === '[data-atlas-pick]') return opts.filter((o) => o.attrs['data-atlas-pick'] !== undefined);
+    return opts;
+  },
+};
+let clicks = [];
+let failFirstClick = false;
+const page = {
+  getByTestId() { return { nth() { return { tagName: 'DIV', evaluate: (f) => f({ tagName: 'DIV' }), click: async () => {} }; } }; },
+  evaluate: async (f, want) => f(want),
+  locator(sel) {
+    return {
+      click: async () => {
+        const want = /data-atlas-pick="([^"]+)"/.exec(sel);
+        if (!want) throw new Error('选择器形态不符: ' + sel);
+        const hit = opts.find((o) => o.attrs['data-atlas-pick'] === want[1]);
+        if (!hit) throw new Error('marker 已失效（元素被重排回收）');
+        if (failFirstClick && clicks.length === 0) { failFirstClick = false; hit.attrs = {}; throw new Error('element is not visible'); }
+        clicks.push(hit.title);
+      },
+    };
+  },
+};
+const expect = {
+  poll(fn) {
+    return { not: { toBe: async (bad) => {
+      for (let i = 0; i < 50; i++) { const v = await fn(); if (v !== bad) return; }
+      throw new Error('poll 超时');
+    } } };
+  },
+};
+// 生成物以该常数作轮询上限（真实由 header 注入）；夹具不定义 ⇒ helper 内 ReferenceError
+// 会撞在自家 catch 上、退化成「找不到唯一选项」，把夹具缺陷伪装成实现缺陷（本钉首跑即踩）。
+const ATLAS_WAIT_TIMEOUT_MS = 100;
+__SRC__
+const run = async () => {
+  await atlasSelect(page, 'mail-time-select', '不限时间', 0);
+  const first = clicks.join(',');
+  clicks = []; failFirstClick = true;
+  const stale = opts.find((o) => o.attrs['data-atlas-pick'] !== undefined);
+  if (stale) stale.attrs = {};   // 上一次留下的标记清掉，模拟重排
+  await atlasSelect(page, 'mail-time-select', '不限时间', 0);
+  return { first, retried: clicks.join(',') };
+};
+run().then((r) => console.log(JSON.stringify(r))).catch((e) => { console.log('ERR ' + e.message); process.exit(1); });
+"""
+    out = subprocess.run(
+        [node, "-e", script.replace("__SRC__", js_src)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert out.returncode == 0, out.stderr + out.stdout
+    data = json.loads(out.stdout.strip().splitlines()[-1])
+    # ① 病灶路径已被切断：点的必须是可见命中项，而不是下标 20 的镜像
+    assert data["first"] == "不限时间", data
+    # ② 标记失效时会重新采样打标再点（真走到重试分支），最终仍点中同一目标
+    assert data["retried"] == "不限时间", data
+
+
+def test_setup_without_app_login_pushes_not_ready() -> None:
+    """契约 §7.1（RFC-20261015-02，2026-10-16 改判；**D80② 升档落地 2026-10-24 / D149**）：
+    stack-profile 未声明 e2e.app_login ⇒ 生成器推 **NOT_READY（退出码 3）**，不再「占位生成 +
+    WARN」半生成——硬前提的输入不得靠「缺失即静默放行」吸收。
+
+    文案按 D103 相抵点指路：「有门但三态都装不下」⇒ 人工会话取出，不是「补声明」的对象。
+    变异 **MB17**：退回 WARN 半生成（退出码 0）⇒ 本钉红。
     """
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         # app_login 是 e2e 段最后一个键（夹具约定）⇒ 切到它之前 = 整段去掉
         make(root, profile=PROFILE.split("  app_login:")[0])
-        r = run(root, "--apply")
-        assert r.returncode == 0, r.stderr + r.stdout
-        assert "e2e.app_login" in r.stderr, r.stderr          # 生成期 WARN（不静默）
-        assert "mode: none" in r.stderr, r.stderr             # WARN 指路：无门项目的声明出口
-        setup_ts = (root / "product" / "e2e" / "scripts" / "atlas-auth.setup.ts").read_text(encoding="utf-8")
-        assert 'const endpoint = "/login";' in setup_ts, setup_ts  # 占位默认（未声明 ⇒ 非取证值）
+        r = run(root)                      # dry-run 即判（前置链在写盘前）
+        assert r.returncode == 3, (r.returncode, r.stderr, r.stdout)
+        assert "NOT_READY" in r.stderr and "e2e.app_login" in r.stderr, r.stderr
+        assert "mode: none" in r.stderr, r.stderr          # 指路：无门项目的显式声明出口
+        assert "人工会话取出" in r.stderr, r.stderr        # D103 相抵点排除类的出路在文案里
+        assert not (root / "product" / "e2e" / "scripts" / "atlas-auth.setup.ts").is_file()
+
+
+def test_app_login_not_ready_json_face_matches_channel() -> None:
+    """D80② 升档（D149）：`--json` 面与 `app_base_url` 同一通道族——`{"ok": false,
+    "not_ready": "app_login", "message": …}`，机读键供消费者（atlas_check 三态 SKIP）分流。
+    变异 **MB18**：机读键写错 / 缺 message ⇒ 本钉红。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        make(root, profile=PROFILE.split("  app_login:")[0])
+        j = run(root, "--json")
+        assert j.returncode == 3, (j.returncode, j.stdout, j.stderr)
+        data = json.loads(j.stdout)
+        assert data.get("ok") is False and data.get("not_ready") == "app_login", j.stdout
+        assert "message" in data and "app_login" in data["message"], j.stdout
 
 
 def test_app_login_section_incomplete_fails_generation() -> None:
@@ -2716,6 +3022,29 @@ def test_refresh_emits_settle_wait_before_reload() -> None:
     assert spec.index(settle) < spec.index("await page.reload();"), spec
 
 
+def test_after_anchor_stays_aligned_when_step_emits_multiple_lines() -> None:
+    """契约 §5.5 `after:<N>`：一条 step 只能占一个 action 槽位。
+
+    现场（2026-10-23）：`refresh` 发射「先等后刷」两行，若拆成两个 actions 元素，
+    后续 `after:N` 会整体前移一格 —— `after:9`（刷新后重新打开面板）落在
+    「点击节点」之前，面板未开时断言必红；且用例越靠后错位越大。
+    """
+    gn = _load_gen()
+    case = {
+        "id": "E2E-REFRESH-002",
+        "_title": "刷新后打开面板",
+        "step": ["refresh", "click home-cta-btn"],
+        "expected": ["after:1 visible home-h1", "after:2 visible home-panel"],
+        "testid": ["home-h1", "home-cta-btn", "home-panel"],
+    }
+    spec = gn.ts_case(case, "/")
+    reload_idx = spec.index("await page.reload();")
+    h1_idx = spec.index("getByTestId('home-h1')")
+    click_idx = spec.index("getByTestId('home-cta-btn').first().click")
+    panel_idx = spec.index("getByTestId('home-panel')")
+    assert reload_idx < h1_idx < click_idx < panel_idx, spec
+
+
 # ── issue #R1/S1（2026-10-16）：`testid:` 项带行内注释 ⇒ F24 规则二豁免仍生效 ────────
 COMMENTED_TID_CASE = """# home 页面用例
 
@@ -2827,3 +3156,26 @@ def test_failure_evidence_has_no_override_switch() -> None:
 
 
 
+
+
+def test_generator_uses_configured_assets_root(tmp_path) -> None:
+    """RFC-20261026-01：`assets_root=docs` 时生成物不得回落到 product/e2e。"""
+    root = tmp_path
+    (root / "atlas.config.yaml").write_text(
+        "version: 1\nlayout:\n  assets_root: docs\n", encoding="utf-8")
+    (root / "docs" / "e2e" / "cases").mkdir(parents=True)
+    (root / "docs" / "stack-profile.yaml").write_text(
+        PROFILE.replace("product/e2e/", "docs/e2e/"), encoding="utf-8")
+    (root / "docs" / "e2e" / "cases" / "home.md").write_text(CASE, encoding="utf-8")
+    (root / "docs" / "e2e" / "e2e-index.md").write_text(INDEX, encoding="utf-8")
+    review = root / "docs" / "e2e" / "reviews" / "2026-01-01-fixture"
+    review.mkdir(parents=True)
+    (review / "review.json").write_text(json.dumps(
+        {"ok": True, "status": "PASS", "root": str(root), "scope": "fixture",
+         "checks": [], "other": []}, ensure_ascii=False), encoding="utf-8")
+    (review / "README.md").write_text("# 审查总结\n\n通过\n", encoding="utf-8")
+
+    r = run(root, "--apply")
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert (root / "docs" / "e2e" / "scripts" / "home.spec.ts").is_file()
+    assert not (root / "product" / "e2e" / "scripts").exists()

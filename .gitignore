@@ -2,3 +2,7 @@
 .pi/
 .write-review/
 node_modules/
+__pycache__/
+*.pyc
+.atlas/runs/
+.worktrees/

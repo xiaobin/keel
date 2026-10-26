@@ -40,6 +40,10 @@ import re
 import sys
 from pathlib import Path
 
+if str(Path(__file__).resolve().parents[1]) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _support.layout import LayoutError, load_layout  # noqa: E402
+
 
 def _format_list(items: list[str], max_show: int = 20) -> str:
     if not items:
@@ -103,7 +107,7 @@ I18N_HINTS = (re.compile(r"\bt\("), re.compile(r"\b[a-z]+\.[a-z]+\.[a-z]+\b"), r
 
 # 分片 step / expected 的动词词表（契约 `rings/e2e/reference.md` §5.5，2026-09-23 定）
 ACTION_VERBS = ("click", "fill", "select", "check", "uncheck", "press", "type", "hover", "refresh", "goto", "waitFor", "download", "upload", "dispatch")
-ASSERT_VERBS = ("text", "contains", "count", "countOptions", "visible", "hidden", "enabled", "disabled", "checked", "unchecked", "value", "attr", "delta")
+ASSERT_VERBS = ("text", "contains", "count", "countOptions", "visible", "hidden", "enabled", "disabled", "checked", "unchecked", "value", "attr", "delta", "request")
 # 契约 §5.6 R9：`expected` 行可加**行首前缀**，显式声明该断言的判据形状。
 # 本校验器只负责**形态项**（前缀后是词表内的动词 / 不嵌套 / `unchanged:` 的用例有提交性动作）；
 # **不判**断言是否空转，也不判初始态成不成立（那是运行期零步基线的职责，§6.0 C-new）。
@@ -264,10 +268,11 @@ def seed_models_check(root: Path, blocks: dict[str, dict]) -> tuple[str, str]:
         ("PASS", f"{len(seeds)} 条用例的 seed 与 {len(models)} 个表/模型对账通过")
 
 
-def upload_fixture_check(root: Path, blocks: dict[str, dict]) -> tuple[str, str]:
+def upload_fixture_check(root: Path, blocks: dict[str, dict], lay=None) -> tuple[str, str]:
     """`upload` 行的 fixture 引用闭环（契约 §5.5，B201-1，2026-10-12）。
 
-    值 = 相对 `product/e2e/fixtures/` 的文件路径（与 §5.8 mock 同基线、同一 fixtures 树）。
+    值 = 相对 `<资产根>/e2e/fixtures/` 的文件路径（资产根默认 `product/`；
+    与 §5.8 mock 同基线、同一 fixtures 树）。
     判据（结构门）：**值形态**（非空 / 非绝对路径 / 无 `..` 段）+ **文件存在**。无用例声明
     `upload` ⇒ PASS（空集合法，N/A 不是通过的反面——空集就是合法形态）。生成器侧生成期
     同款检查（缺 ⇒ exit 2 列明）——两侧同步，防「校验器放行、生成器认不得」的半通状态。
@@ -280,7 +285,7 @@ def upload_fixture_check(root: Path, blocks: dict[str, dict]) -> tuple[str, str]
                 uploads.append((cid, parts[2].strip() if len(parts) > 2 else ""))
     if not uploads:
         return "PASS", "无用例声明 `upload`（可选动作词）"
-    fixtures = root / "product" / "e2e" / "fixtures"
+    fixtures = (lay or load_layout(root)).e2e_fixtures_dir
     bad: list[str] = []
     for cid, rel in uploads:
         if not rel:
@@ -334,7 +339,12 @@ def _route_hit(p: str, page_routes) -> bool:
 
 def validate(root: Path) -> Result:
     res = Result()
-    e2e = root / "product" / "e2e"
+    try:
+        lay = load_layout(root)
+    except LayoutError as exc:
+        res.add("项目布局配置", "FAIL", str(exc))
+        return res
+    e2e = lay.e2e_dir
     index = e2e / "e2e-index.md"
     cases = e2e / "cases"
     shard_files = sorted(cases.glob("*.md")) if cases.is_dir() else []
@@ -444,7 +454,7 @@ def validate(root: Path) -> Result:
         res.add("页面表合法", "PASS" if not page_bad2 else "FAIL",
                 f"路由非/开头或重复={page_bad2[:8]}" if page_bad2 else "")
     if known is None:
-        known = {md.stem for md in (root / "product" / "e2e" / "cases").glob("*.md")}
+        known = {md.stem for md in lay.e2e_cases_dir.glob("*.md")}
         res.add("页面表合法", "WARN", "索引无页面表（E1 起应有；暂按分片文件名推导页清单）")
     if known is not None and page_rows:
         miss = sorted({g["页面"] for g in grid} - known)
@@ -505,7 +515,7 @@ def validate(root: Path) -> Result:
     # 关联AC
     ac_bad = [g["用例ID"] for g in grid if not AC_RE.match(g["关联AC"])]
     res.add("关联AC 格式", "PASS" if not ac_bad else "FAIL", f"{ac_bad[:8]}")
-    prd_files = sorted((root / "product" / "prd").glob("*-prd.md")) if (root / "product" / "prd").is_dir() else []
+    prd_files = sorted(lay.prd_dir.glob("*-prd.md")) if lay.prd_dir.is_dir() else []
     if not prd_files:
         res.add("关联AC 可达", "N/A", "门控态：无域级 PRD")
     else:
@@ -697,7 +707,7 @@ def validate(root: Path) -> Result:
     # 段缺失 / keys 为空 ⇒ 该靶场不允许任何该类预设（用例出现对应行即 FAIL）。
     # `session_preset`（2026-10-16，issue #13）与 `query_preset`（2026-10-18，`DESIGN.md` D109）
     # 同族：同为**前提面**，两个载体各一段。
-    _prof_path = root / "product" / "stack-profile.yaml"
+    _prof_path = lay.stack_profile
 
     def _preset_keys(sub: str, field: str = "keys") -> set[str]:
         if not _prof_path.is_file():
@@ -719,6 +729,7 @@ def validate(root: Path) -> Result:
     after_bad = []
     waitfor_assert = []
     delta_bad = []
+    request_bad = []
     cross_page_bad = []
     # R10 门用反查表 page_routes_map 已在页面表解析处（上方）构建
     for g in grid:
@@ -919,7 +930,7 @@ def validate(root: Path) -> Result:
         for raw in raw_exp:
             e = _strip_prefix(raw)
             bits = _code(e).split(" ")
-            if len(bits) >= 2 and bits[0] in ASSERT_VERBS:
+            if len(bits) >= 2 and bits[0] in ASSERT_VERBS and bits[0] != "request":
                 verbs_by_slice.setdefault((_step_anchor(raw), bits[1]), set()).add(bits[0])
         for (slice_n, tid), verbs in verbs_by_slice.items():
             where = f"{g['用例ID']}:{tid}" + (f"@after:{slice_n}" if slice_n else "")
@@ -950,6 +961,26 @@ def validate(root: Path) -> Result:
             m_anchor = AFTER_RE.match(raw.lstrip())
             if m_anchor is not None or (m_anchor.group(2) if m_anchor else raw).lstrip().startswith(LINE_PREFIXES):
                 delta_bad.append(f"{g['用例ID']}:叠写")
+        # D142：`request <api> <json-path> <expected>` 形态门。三态缺席语义、api 后缀、
+        # 必须有 step（动作锚点）；`(空)` 因无法区分「缺失 / null」而拒绝。
+        for raw in raw_exp:
+            has_kind = raw.lstrip().startswith(LINE_PREFIXES)
+            code = _code(_strip_prefix(raw))
+            if not code.startswith("request "):
+                continue
+            mreq = re.match(r"^request\s+(\S+)\s+(\S+)\s+(.+)$", code)
+            if not mreq:
+                request_bad.append(f"{g['用例ID']}:形态（需 request <api> <path> <expected>）")
+                continue
+            api, _path, expected = mreq.groups()
+            if has_kind:
+                request_bad.append(f"{g['用例ID']}:与 initial/unchanged 叠写")
+            if not re.fullmatch(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+", api):
+                request_bad.append(f"{g['用例ID']}:api 须为带点后缀（{api}）")
+            if expected.strip() == "(空)":
+                request_bad.append(f"{g['用例ID']}:(空) 三态不明，请用 (缺席)/null/\"\"")
+            if not step:
+                request_bad.append(f"{g['用例ID']}:无 step（动作锚点不存在）")
         # 契约 §5.6 R10（2026-10-05 补，P11）：跨页用例终态断言必须落首列页（断言落点页）。
         # 多页用例中，未加 after: 步骤锚的 expected 断言如果在非首列页上求值，会因为目标 DOM 缺失而沦为空洞真。
         pgs = d.get("pages", [])
@@ -1093,6 +1124,8 @@ def validate(root: Path) -> Result:
             f"`waitFor` 出现在 expected（应写在 step）= {_format_list(waitfor_assert)}")
     res.add("delta 相对断言形态", "PASS" if not delta_bad else "FAIL",
             f"`delta` 值须为 `±N` 且不得与豁免通道/步骤锚叠写 = {_format_list(delta_bad)}")
+    res.add("request 断言形态", "PASS" if not request_bad else "FAIL",
+            f"`request` 需 api 带点后缀 + json-path + 三态值，且必须有 step = {_format_list(request_bad)}")
     res.add("豁免前缀不嵌套", "PASS" if not nested_prefix else "FAIL", f"{_format_list(nested_prefix)}")
     res.add("步骤锚合法", "PASS" if not after_bad else "FAIL", f"{_format_list(after_bad)}")
     res.add("跨页终态断言落首列页", "PASS" if not cross_page_bad else "FAIL", f"{_format_list(cross_page_bad)}")
@@ -1112,8 +1145,36 @@ def validate(root: Path) -> Result:
     _lvl, _det = seed_models_check(root, blocks)
     res.add("seed × models 对账", _lvl, _det)
     # 契约 §5.5（B201-1，2026-10-12）：upload 行的 fixture 引用存在（值形态 + 文件存在）
-    _lvl, _det = upload_fixture_check(root, blocks)
+    _lvl, _det = upload_fixture_check(root, blocks, lay)
     res.add("upload fixture 引用存在", _lvl, _det)
+    # D143：manual.md 旧行 + `atlas-manual` 块（解析单源 `_support/manual_block.py`）
+    manual_path = e2e / "manual.md"
+    if not manual_path.is_file():
+        res.add("manual 走查项形态", "N/A", "无 manual.md（可选增强）")
+    else:
+        try:
+            from _support.manual_block import parse_manual
+            manual_items = parse_manual(manual_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # 坏块必须响亮失败，不得静默忽略
+            res.add("manual 走查项形态", "FAIL", f"解析失败：{exc}")
+        else:
+            manual_bad: list[str] = []
+            seen_ids: set[str] = set()
+            for m in manual_items:
+                mid = m.get("id") or ""
+                if not mid:
+                    manual_bad.append("缺 ID")
+                elif mid in seen_ids:
+                    manual_bad.append(f"{mid}:ID 重复")
+                seen_ids.add(mid)
+                if m.get("page") not in known:
+                    manual_bad.append(f"{mid}:页面不在页面表（{m.get('page')}）")
+                steps = m.get("steps") or []
+                for i, s in enumerate(steps, 1):
+                    if not s.get("action") or not s.get("expect"):
+                        manual_bad.append(f"{mid}:步骤{i} 缺操作/观察")
+            res.add("manual 走查项形态", "PASS" if not manual_bad else "FAIL",
+                    f"{_format_list(manual_bad)}" if manual_bad else "")
     return res
 
 

@@ -183,15 +183,24 @@ const commands = {
     process.exit(r.status ?? 1);
   },
 
+  init(root) {
+    const args = [path.join(repoRoot, 'scripts/init.mjs'), '--project-root', root];
+    if (process.argv.includes('--yes')) args.push('--yes');
+    const r = spawnSync('node', args, { stdio: 'inherit' });
+    process.exit(r.status ?? 1);
+  },
+
   onboard(root) {
-    const n = name || fail('usage: keel onboard <change> [--project-root <p>]');
-    const r = spawnSync('node', [path.join(repoRoot, 'scripts/onboard.mjs'), '--project-root', root, '--name', n], { stdio: 'inherit' });
+    const n = name || fail('usage: keel-h onboard <change> [--project-root <p>] [--yes]');
+    const args = [path.join(repoRoot, 'scripts/onboard.mjs'), '--project-root', root, '--name', n];
+    if (process.argv.includes('--yes')) args.push('--yes');
+    const r = spawnSync('node', args, { stdio: 'inherit' });
     process.exit(r.status ?? 1);
   },
 
   start(root) {
     const req = path.join(root, 'docs/comet/changes', name, 'start-request.json');
-    if (!existsSync(req)) fail(`缺 ${req}；先 keel onboard。`);
+    if (!existsSync(req)) fail(`缺 ${req}；先 keel-h onboard <change>。`);
     // Clean-tree gate (0009 §3): any tracked/untracked dirt becomes part of the
     // candidate fingerprint; committing later drifts it and locks the run.
     // Runtime-owned files (comet-state.yaml etc.) are excluded by the gate itself.
@@ -429,26 +438,35 @@ const commands = {
     const a = d.agent || {};
     console.log(`归档：phase=${a.phase} status=${a.status}。`, d.summary || '');
   },
+
+  update(root) {
+    const args = [path.join(repoRoot, 'scripts/update.mjs'), '--project-root', root];
+    if (process.argv.includes('--force')) args.push('--force');
+    const r = spawnSync('node', args, { stdio: 'inherit' });
+    process.exit(r.status ?? 1);
+  },
 };
 
 if (!cmd || cmd === 'help' || cmd === '--help') {
   console.log(`keel — Keel 工作流命令（Comet Native × Atlas 治理）
 
-  keel onboard <change>   开户：装配三环资产 + .atlas + start-request
-  keel start <change>     启动 Run
-  keel status <change>    查看 Run 状态与待办
-  keel next <change>      推进 Runtime 可自行的部分（检查/扩展/报告）
-  keel build <change> --payload <f.json>   Builder 交接（payload 只含业务字段）
-  keel verify <change> --payload <f.json>  独立 Verifier 裁决
-  keel confirm <change> --summary <说明> [--coordination-mode multi-session|single-session]  确认当前等待（Shape/验收；Supervisor 分流需 coordination-mode）
-  keel archive <change>   归档
-  keel selftest           全链回归自验（约 5 分钟）
+  keel-h init [--yes]     项目接入：comet 运行时检测（缺失可确认安装）+ 装配 .atlas + 挂接既有应然资产（不创建 change）
+  keel-h onboard <change> [--yes]   开户：init + brief + start-request
+  keel-h start <change>     启动 Run
+  keel-h status <change>    查看 Run 状态与待办
+  keel-h next <change>      推进 Runtime 可自行的部分（检查/扩展/报告）
+  keel-h build <change> --payload <f.json>   Builder 交接（payload 只含业务字段）
+  keel-h verify <change> --payload <f.json>  独立 Verifier 裁决
+  keel-h confirm <change> --summary <说明> [--coordination-mode multi-session|single-session]  确认当前等待（Shape/验收；Supervisor 分流需 coordination-mode）
+  keel-h archive <change>   归档
+  keel-h update [--force]   升级已装配项目的 .atlas 载荷并复验（本地改动默认拒绝，--force 覆盖；有进行中 Run 时拒绝）
+  keel-h selftest           全链回归自验（约 5 分钟）
 
 通用：--project-root <p>（默认 cwd，必须物理路径）；COMET_BIN 指定 comet 运行时（默认取 npm 依赖 @rpamis/comet）。
 build payload: {summary, acceptanceReview:[{id,status,evidence,note}], checks, knownLimits, verificationChecks}
 verify payload: {verdict, summary, acceptance:[{id,result,reason}], risks}`);
   process.exit(0);
 }
-if (!commands[cmd]) fail(`未知命令：${cmd}（keel help）`);
-if (cmd !== 'onboard' && cmd !== 'selftest' && !name) fail(`keel ${cmd} 需要 <change> 名`);
+if (!commands[cmd]) fail(`未知命令：${cmd}（keel-h help）`);
+if (cmd !== 'init' && cmd !== 'onboard' && cmd !== 'selftest' && cmd !== 'update' && !name) fail(`keel-h ${cmd} 需要 <change> 名`);
 commands[cmd](projectRoot());

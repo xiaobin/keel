@@ -315,7 +315,13 @@ PRD_DEMO = """# demo 域 PRD
 
 ## 六、Assumptions & Defaults
 
+无。
+
 ## 七、变更记录
+
+| 版本 | 日期 | 变更内容及原因 | 影响 | 结论与后续 |
+|---|---|---|---|---|
+| 1.0 | 2026-09-25 | 初始 | 无（未触达验证面） | 无 |
 """
 
 
@@ -1440,6 +1446,97 @@ def test_e2e_index_new_assert_verbs_render_and_validate() -> None:
         ), [(c["check"], c["level"]) for c in res.checks]
 
 
+def test_e2e_index_request_assertion_shape() -> None:
+    """D142：`request <api> <json-path> <expected>` 的形态门；api 不得被 testid 提取器误算。
+
+    正向：合法 request 断言 PASS；反向：缺 path/expected、api 无点、`(空)`、与
+    initial/unchanged 叠写均 FAIL。两侧同测（校验器放行 + 生成器可渲染）。
+    """
+    good = CASE_GOOD.replace(
+        "- text home-title 首页        # 页面标题文案为「首页」",
+        "- request app.updateApp Data.reqDTO.config.nodeParam.mailStatus (缺席)  # 字段缺席")
+
+    def level(case_text: str) -> tuple[str, list[dict]]:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            mk_prototype(root)
+            mk_cases(root, case_text)
+            mk_index(root)
+            res = ve.validate(root)
+            return res.status, res.checks
+
+    status, checks = level(good)
+    assert not any(c["check"] == "request 断言形态" and c["level"] == "FAIL" for c in checks), checks
+    assert any(c["check"] == "request 断言形态" and c["level"] == "PASS" for c in checks), checks
+    assert gn.ts_case(
+        {"id": "E2E-HOME-001", "_title": "t", "step": ["click home-cta-btn"],
+         "expected": ["request app.updateApp Data.a (缺席)"], "testid": ["home-cta-btn"]},
+        "/",
+    ).count("await atlasExpectRequest(") == 1
+
+    bad_cases = [
+        ("request app.updateApp", "形态"),
+        ("request app Data.a (缺席)", "api 须为带点后缀"),
+        ("request app.updateApp Data.a (空)", "(空) 三态不明"),
+        ("initial: request app.updateApp Data.a null", "叠写"),
+    ]
+    for bad, needle in bad_cases:
+        status, checks = level(CASE_GOOD.replace(
+            "- text home-title 首页        # 页面标题文案为「首页」", f"- {bad}  # bad"))
+        row = next(c for c in checks if c["check"] == "request 断言形态")
+        assert row["level"] == "FAIL", (bad, row)
+        assert needle in row["detail"], (bad, row)
+
+    # testid 提取：api 不是 testid（不得报「原型无 app.updateApp」）
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        mk_prototype(root)
+        mk_cases(root, good)
+        mk_index(root)
+        tres = vt.validate(root)
+    assert not any("app.updateApp" in (c.get("detail") or "") for c in tres.checks), tres.checks
+
+
+def test_e2e_index_manual_block_shape() -> None:
+    """D143：manual.md 的 `atlas-manual` 块必须 ID 唯一、页面在页面表、步骤含操作/观察；
+    旧单行格式继续可用。坏块/坏页面/重复 ID ⇒ FAIL，解析失败也 FAIL。"""
+    valid = """## MANUAL-HOME-001 结构化走查
+
+```atlas-manual
+page: home
+step:
+  - 打开首页 | 首页出现 |
+  - 保存 | payload 不含字段 | const p = 1
+```
+"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        mk_prototype(root)
+        mk_cases(root, CASE_GOOD)
+        mk_index(root)
+        manual = root / "product" / "e2e" / "manual.md"
+        manual.write_text(valid, encoding="utf-8")
+        res = ve.validate(root)
+        row = next(c for c in res.checks if c["check"] == "manual 走查项形态")
+        assert row["level"] == "PASS", row
+
+    def level(text: str) -> dict:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            mk_prototype(root)
+            mk_cases(root, CASE_GOOD)
+            mk_index(root)
+            (root / "product" / "e2e" / "manual.md").write_text(text, encoding="utf-8")
+            res = ve.validate(root)
+            return next(c for c in res.checks if c["check"] == "manual 走查项形态")
+
+    assert level(valid.replace("page: home", "page: nope"))["level"] == "FAIL"
+    assert level(valid.replace("  - 打开首页 | 首页出现 |", "  - 打开首页 | |"))["level"] == "FAIL"
+    dup = valid + "\n" + valid.replace("MANUAL-HOME-001", "MANUAL-HOME-001")
+    assert level(dup)["level"] == "FAIL"
+    assert level(valid.replace("page: home", "id: MANUAL-HOME-001\npage: home"))["detail"].startswith("解析失败")
+
+
 def test_e2e_index_title_must_match_shard() -> None:
     """契约 §8.2（2026-09-25 补，`3509 §B31`）：索引 `中文标题` == 分片
     `## <ID> <标题>` 的**标题段**（空白归一后全等）。
@@ -2484,6 +2581,89 @@ def test_prd_change_form_fields_and_revision_log_body() -> None:
         mk_prd_raw(root, empty11, dom)
         c = _p4(root)
         assert c["status"] == "FAIL" and "正文为空" in c["detail"], c
+
+
+def test_rfc20261023_02_change_record_shape_and_impact_column() -> None:
+    """RFC-20261023-02 ③：§七 表头三态 + 「影响」单元格空 ⇒ FAIL（独立 check 行）。
+
+    变异：**M-new-3** 删 legacy 分支（3 列直接 FAIL）⇒ 第二侧红；摘「影响」空判据
+    ⇒ 第三侧红；表头不可辨分支摘掉 ⇒ 第四侧红。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        dom = FM_DOMAIN + PRD_DEMO.format(ac="AC-HOME-001", rows="| `AC-HOME-001` | 纯渲染 |")
+        plain = FM_GLOBAL + PRD_GLOBAL
+
+        def row() -> dict:
+            return {c["check"]: c for c in vpr.validate(root).checks}["变更记录形态"]
+
+        mk_prd_raw(root, plain, dom)
+        assert row()["status"] == "PASS", row()
+
+        legacy = dom.replace(
+            "| 版本 | 日期 | 变更内容及原因 | 影响 | 结论与后续 |\n|---|---|---|---|---|\n"
+            "| 1.0 | 2026-09-25 | 初始 | 无（未触达验证面） | 无 |",
+            "| 版本 | 日期 | 变更说明 |\n|---|---|---|\n| 1.0 | 2026-09-25 | 初始 |")
+        mk_prd_raw(root, plain, legacy)
+        assert row()["status"] == "WARN" and "legacy" in row()["detail"], row()
+
+        blank = dom.replace("| 无（未触达验证面） | 无 |", "|  | 无 |")
+        mk_prd_raw(root, plain, blank)
+        assert row()["status"] == "FAIL" and "影响" in row()["detail"], row()
+
+        weird = dom.replace("| 变更内容及原因 | 影响 | 结论与后续 |", "| 甲 | 乙 | 丙 |")
+        mk_prd_raw(root, plain, weird)
+        assert row()["status"] == "FAIL", row()
+
+
+def test_rfc20261023_02_optional_section_explicit_none() -> None:
+    """RFC-20261023-02 ④：§六 空表/空节且无显式结论 ⇒ WARN 首版；`无` ⇒ PASS；
+    开户最小集（§六 整节不出现）⇒ 本检查不参与（PASS 行）。
+
+    变异：**M-new-2** 空表判据恒真（恒 PASS）⇒ 第一侧红。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        plain = FM_GLOBAL + PRD_GLOBAL
+        dom = FM_DOMAIN + PRD_DEMO.format(ac="AC-HOME-001", rows="| `AC-HOME-001` | 纯渲染 |")
+
+        def row() -> dict:
+            return {c["check"]: c for c in vpr.validate(root).checks}["可无项显式（§六）"]
+
+        empty = dom.replace("## 六、Assumptions & Defaults\n\n无。",
+                            "## 六、Assumptions & Defaults\n\n")
+        mk_prd_raw(root, plain, empty)
+        assert row()["status"] == "WARN" and "显式结论" in row()["detail"], row()
+
+        empty_tbl = dom.replace("## 六、Assumptions & Defaults\n\n无。",
+                                "## 六、Assumptions & Defaults\n\n"
+                                "| 假设内容 | 采用的默认值 | 影响面 | 何时需要澄清 |\n"
+                                "|---|---|---|---|\n")
+        mk_prd_raw(root, plain, empty_tbl)
+        assert row()["status"] == "WARN", row()
+
+        mk_prd_raw(root, plain, dom)
+        assert row()["status"] == "PASS", row()
+
+        na = dom.replace("## 六、Assumptions & Defaults\n\n无。\n\n", "")
+        mk_prd_raw(root, plain, na)
+        assert row()["status"] == "PASS", row()      # 节缺席 = 开户最小集，不参与
+
+
+def test_forbidden_vocabulary_single_source() -> None:
+    """RFC-20261023-02 ④ 词表守恒：两校验器 `FORBIDDEN` ⊆ `global-rules` §5 词表，
+    且 `[必填` / `[条件必填` 三方齐在（改任一侧 ⇒ 红）。"""
+    rules = (PKG_ROOT / "shared" / "global-rules.md").read_text(encoding="utf-8")
+    m = re.search(r"## 5\. 占位符禁令.*?(?=\n## )", rules, re.S)
+    assert m, "找不到 global-rules §5 占位符禁令"
+    tokens = set(re.findall(r"`([^`\n]+)`", m.group(0)))
+    vs = load("validate_structure", "validators/validate_structure.py")
+    for mod, name in ((vpr, "validate_prd"), (vs, "validate_structure")):
+        extra = set(mod.FORBIDDEN) - tokens
+        assert not extra, f"{name} FORBIDDEN 超出 §5 单源：{sorted(extra)}"
+        for tok in ("[必填", "[条件必填"):
+            assert tok in mod.FORBIDDEN, (name, "缺", tok)
+            assert tok in tokens, ("§5 缺", tok)
 
 
 def test_testids_stub_missing_fails() -> None:
@@ -3632,6 +3812,41 @@ def test_validate_testids_strip_comments() -> None:
         assert "notes-commented-html" not in counts
 
 
+def test_validate_testids_strip_comments_once_per_file() -> None:
+    """P5-A（D141）：剥注释每文件只做一次；第二次循环复用第一次结果。
+
+    直接数 `strip_comments` 的调用次数：修复前每文件 2 次（第一次循环 + 第二次循环），
+    修复后 1 次。输出仍要正确（静态属性 / dataset / setAttribute 都要抽到）。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src = root / "src"
+        src.mkdir(parents=True)
+        (src / "a.js").write_text('el.dataset.testid = "p5a-a";', encoding="utf-8")
+        (src / "b.js").write_text('<i data-testid="p5a-b"></i>', encoding="utf-8")
+        (src / "c.js").write_text('el.setAttribute("data-testid", "p5a-c");', encoding="utf-8")
+        (root / "product").mkdir(parents=True, exist_ok=True)
+        (root / "product" / "stack-profile.yaml").write_text(
+            "product: p5a-test\norigin: greenfield\napps:\n  - name: web\n    kind: frontend\n    path: src\n",
+            encoding="utf-8",
+        )
+        original = vt.strip_comments
+        calls: list[str] = []
+
+        def counted(text: str) -> str:
+            calls.append(text)
+            return original(text)
+
+        vt.strip_comments = counted
+        try:
+            _per_page, counts, files, _expanded, _dups = vt.collect_testids_expanded(root, ["src"])
+        finally:
+            vt.strip_comments = original
+        assert len(files) == 3  # 夹具自检：三个源文件
+        assert len(calls) == len(files), f"每文件只应剥一次；实际 {len(calls)} 次（修复前为 6）"
+        assert {"p5a-a", "p5a-b", "p5a-c"} <= set(counts), counts
+
+
 def test_stack_profile_review_section_validation() -> None:
     """v0.1.0-beta.14: 校验 e2e.review 配置段（mode: gate | auto-baseline | off）。"""
     with tempfile.TemporaryDirectory() as td:
@@ -3762,3 +3977,42 @@ testid:
         lv = {c["check"]: c["level"] for c in res.checks}
     assert lv["ID 格式"] == "PASS", lv["ID 格式"]
     assert lv["索引↔分片标题一致"] == "PASS", lv["索引↔分片标题一致"]
+
+
+def test_testids_scan_skips_runtime_artifact_dirs() -> None:
+    """D150 合成靶场咬合批(2026-10-25):实然扫描**必须跳过运行期产物目录**
+    (`.atlas-run/` / `test-results/` 等,SKIP_DIRS 新增段)。
+
+    现场:执行器时序下「失败批 ⇒ 立即重验」成为常态路径,而 Playwright 失败批会在
+    `.atlas-run/<用例>/error-context.md` 留下含 testid 字面的快照文本——不排除则
+    `validate_testids` 扫出「testid 全站唯一 —— 重复」**假红**(真源只声明一次)。
+    产物是**回声**,与测试文件同族(issue #27/#33 同判据)。
+    变异 **MB21**(摘 `.atlas-run` 排除 ⇒ 本钉红)。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        # 复现 playground 场景:apps[].path = "."(整仓扫描)——只有这时 .atlas-run/ 才落在扫描域内
+        (root / "product").mkdir(parents=True, exist_ok=True)
+        (root / "product/stack-profile.yaml").write_text(
+            "product: demo\napps:\n  - name: web\n    path: .\n    kind: frontend\n"
+            "    role: landing\n    stack: demo\n", encoding="utf-8")
+        (root / "page.html").write_text(
+            '<button data-testid="home-title">ok</button>', encoding="utf-8")
+        mk_stub(root)
+        mk_cases(root)
+        mk_index(root)
+        art = root / ".atlas-run" / "some-case-chromium"
+        art.mkdir(parents=True)
+        (art / "error-context.md").write_text(
+            '<h1 data-testid="home-title">快照回声</h1>', encoding="utf-8")
+        tr = root / "test-results" / "x"
+        tr.mkdir(parents=True)
+        (tr / "trace.md").write_text('data-testid="home-title"', encoding="utf-8")
+        import importlib.util as _iu
+        spec_ = _iu.spec_from_file_location(
+            "vtid_scan", PKG_ROOT / "validators" / "validate_testids.py")
+        vtid_ = _iu.module_from_spec(spec_)
+        spec_.loader.exec_module(vtid_)
+        files = {str(f.relative_to(root)) for f in vtid_._scan_files([root])}
+        assert not any(f.startswith((".atlas-run/", "test-results/")) for f in files), \
+            sorted(f for f in files if f.startswith((".atlas-run/", "test-results/")))

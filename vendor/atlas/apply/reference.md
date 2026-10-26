@@ -2,6 +2,7 @@
 
 > 本环为 atlas 独立 skill `atlas-apply` 的执行契约，位于 `.atlas/apply/reference.md`。
 > 执行前先读共享契约：`.atlas/shared/global-rules.md`、`stack-profile.md`、`single-source.md`、`layout.md`。
+> 路径约定：本文 `product/` 均为**默认资产根**示例；实际按项目根 `atlas.config.yaml` 的 `layout.assets_root` 解析（见 `shared/layout.md` §1.1）。
 > 本环**跨四环**，是 atlas 里唯一的编排件：它只做「按需求跨环增量」与「按序全量」两件事，环内逻辑一律引用各环自己的契约，不在此复制正文。
 
 ## 0. 一句话
@@ -76,6 +77,7 @@
 - **门是语义判断，机器判不了**（与 `§8 末注` 同源）：所以要求把**判定 + 依据**写进 `atlas-apply.md`，让复核者一眼看出它有没有偷懒。
 - **E2E 首跑取证兜底（2026-10-16，`RFC-20261015-02` / issue #11）**：第 3 问判「是」且 `e2e.app_login` 仍未声明 ⇒ 向用户**追问一次**（`real` 四值 / `mode: none` / `fabricated` + `storage_key`，三选一必须显式），落 `product/stack-profile.yaml` 后再进 e2e 环。追问是 UX 加速器，不是判据——机器判据是生成器 `not_ready`（升档 = 下一次真跑准备日，`shared/gates.md`「E2E 真跑」行）；adopt 开户已问过（同批「靶场接入取证」）的项目此处自然不触发。
 - **环间人工门（E1 起；2026-09-29 重议 = `3507 AQ`，B124 结论）**：两道人侧门——① **走查单确认门（实现前，硬）**：改变应然 UI 的需求，域级 PRD 的「用户旅程走查」节须用户显式确认（节首 `已确认：<日期>`；`rings/prd/reference.md` §4·八，确认前对照 `product/design.md`（存在时）视觉方向，`3507 BE`），确认前 **`apply` 不得进 `e2e` 环**；② **验收走查门（收口前）**：该域 E2E 在真实应用全 green 后，用户按域级 PRD 功能清单逐条在真实应用上过一遍（可用 + 符合已确认走查单），确认后才算域收口；不符 ⇒ 差异登记且域不收口；真实应用不可用 ⇒ 与 E2E 同为 `blocked` 显式带原因（`rings/e2e/reference.md` §5.4 末）。`e2e` 用例另走独立审查门（`rings/e2e/reference.md` §12）+ 首跑分类协议（同文件 §5.4）。原型增量人工 review 门已随环退役（`3508 §92`）。
+- **走查单确认门的机器面（2026-10-23，`RFC-20261022-01` M1）**：`validators/validate_walkthrough.py` 读本报告（`atlas-apply.md`）第 2 问**已写下**的判定，与 `product/prd/<domain>-prd.md` 的 `> 已确认：YYYY-MM-DD` 行对账。因此报告里第 2 问的答句必须写成「是 / 否」开头；受影响域以报告内对 `product/prd/<domain>-prd.md` 的路径引用为准（解析不到 ⇒ WARN 要求人工核对）。本器只判「写下的『是』与确认行的对账」，不判三问语义对错（那仍归人）。
 - 结构事实的**实现后**回写不属于 apply：由 `after_finish` hook（`refresh_structure.py`，事实区）与 Finish 的 `trellis-update-spec`（语义区）负责（D38）。
 
 `all` 模式的顺序固定为 **`structure → prd → e2e`**（含 structure 全量）。
@@ -194,6 +196,7 @@ apply 只对**本次受影响集合**落笔，**不整文件覆盖**任何项目
 
 - **单写者表面（硬）**：每个共享文件在任一时刻**只允许一个在办任务**持有写权。
 - **声明与分派**：并发前，每个任务必须**声明自己要写哪些项目级文件**；由用户 / 编排者按 `one writer per file` 分派；冲突时**停下报告**，不得抢占（实测第三次才守住，`3508 §55 一`）。
+- **claim 钩子（2026-10-23，`RFC-20261022-01` M3）**：共享文件动手前 `python3 .atlas/scripts/write_claim.py take --file <路径> --task <需求ID>`，收口时 `release --file <路径>`。每 claim 一个原子文件（`.atlas/runs/write-claims/<hash>.json`，`O_CREAT|O_EXCL`）⇒ 并发 take 同一文件时后者**直接退出非零并指名在办任务**；未释放的 claim 由 `atlas_check` 的 `写面残留` 行 WARN 点名。**降级路径**：旧装配无此命令 ⇒ 纪律照旧（本钩子的主语义是「有命令则机器判」，安全性不押在降级上）。claims 是运行态，`.atlas/` 不入库 ⇒ 不进 git 历史；`validate_e2e_index` 的事后兜底保留不撤。
 - **降串行度的建议（非硬）**：索引类表面可**按用例 ID 分区**（或拆成每页一份的反向索引）；但反向视图现在是**生成**的（`single-source` §2），所以首选是「一次只让一个任务改主表」。
 - **不属本节**：需求级文件（`.trellis/tasks/**`）天然一任务一份，无需仲裁。
 

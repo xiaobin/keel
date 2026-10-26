@@ -10,6 +10,9 @@
 - 2026-10-14：并入「**AC 号唯一**」判据（域级 PRD 内 AC 号跨文件 / 同文件不得重复）；
   原属地 `validate_ledger.py` 的项目侧判据随「知识库 / 台账子系统」退役归位本环。
 - 判定：PASS / WARN / FAIL；FAIL → 退出码 1，其余 0。
+- 2026-10-23（`RFC-20261023-02` ③④）：新增两条**独立机器检查**——「变更记录形态」
+  （5 列 PASS / legacy 3 列 WARN / 表头不可辨或「影响」空 ⇒ FAIL；独立行，不并入参数 4
+  的聚合）与「可无项显式（§六）」（§六 空表/空节且无显式 `无` ⇒ WARN 首版）。
 
 用法：
     python3 validate_prd.py --root <项目根> [--json]
@@ -22,7 +25,12 @@ import re
 import sys
 from pathlib import Path
 
-FORBIDDEN = ["TODO", "待补充", "TBD", "待定", "视情况而定", "后续补充", "[FIELD:]"]
+if str(Path(__file__).resolve().parents[1]) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _support.layout import LayoutError, load_layout  # noqa: E402
+
+FORBIDDEN = ["TODO", "待补充", "TBD", "待定", "视情况而定", "后续补充", "[FIELD:]",
+             "[必填", "[条件必填"]
 EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,6}$")
 BACKTICK = re.compile(r"`([^`\n]+)`")
 GATE_ROW = re.compile(r"^\|\s*\d+\s*\|", re.M)
@@ -174,9 +182,9 @@ def pending_gate(text: str) -> bool:
     return bool(GATE_ROW.search(section))
 
 
-def read_origin(root: Path) -> str:
-    """读 `product/stack-profile.yaml` 顶层的 `origin:`（缺省 = greenfield，保持既有行为）。"""
-    p = root / "product" / "stack-profile.yaml"
+def read_origin(root: Path, lay=None) -> str:
+    """读 `资产根/stack-profile.yaml` 顶层的 `origin:`（缺省 = greenfield，保持既有行为）。"""
+    p = (lay or load_layout(root)).stack_profile
     if not p.is_file():
         return DEFAULT_ORIGIN
     for raw in p.read_text(encoding="utf-8").splitlines():
@@ -223,6 +231,32 @@ def table_with_all_cols(section: str, cols: tuple[str, ...]) -> bool:
     return False
 
 
+def _cells(line: str) -> list[str]:
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def _table_rows(section: str) -> tuple[list[str], list[list[str]]]:
+    """该节**首个**表格的 `(表头, 数据行)`；无表返回 `([], [])`。
+
+    表头判定 = 下一行是分隔行（只含 `|` / `-` / `:` / 空白且含 `-`）——模板正文里的
+    散文表格（§六 假设表的占位行）不影响：占位行是**数据行**，不是表头。
+    """
+    lines = section.splitlines()
+    for i, ln in enumerate(lines):
+        if not ln.startswith("|") or i + 1 >= len(lines):
+            continue
+        sep = lines[i + 1]
+        if not (sep.startswith("|") and re.fullmatch(r"[\s|:\-]+", sep) and "-" in sep):
+            continue
+        rows: list[list[str]] = []
+        for row in lines[i + 2:]:
+            if not row.startswith("|"):
+                break
+            rows.append(_cells(row))
+        return _cells(ln), rows
+    return [], []
+
+
 # AC 号**定义行**：表格首格 = 该 ID 且**至少 3 列**（`| ID | 场景 | 回指规则 |`）。
 # 必须排除引用行（跨域回指 / 规则→AC 列）与结构类 AC 清单（只有 2 列）。**`[^|\n]` 不能写成 `[^|]`**
 # （后者会跨行吃掉后续内容 ⇒ 把 2 列行也当 3 列）。
@@ -252,20 +286,26 @@ def ac_id_collisions(domains: list[Path]) -> list[str]:
 
 def validate(root: Path) -> Result:
     res = Result()
-    prd_dir = root / "product" / "prd"
+    try:
+        lay = load_layout(root)
+    except LayoutError as exc:
+        res.add("项目布局配置", "FAIL", str(exc))
+        return res
+    prd_dir = lay.prd_dir
     prd = prd_dir / "prd.md"
     readme = prd_dir / "README.md"
     domains = sorted(p for p in prd_dir.glob("*-prd.md"))
 
     if not prd.is_file():
-        if read_origin(root) == "adopt":
+        if read_origin(root, lay) == "adopt":
             # `origin: adopt` 且**尚未开户**：不是失败，是「还没有可校验的资产」——
             # 旧项目接入的入场形态就是「资产为空、从第一条需求长起」（`apply/reference.md` §1 的 `adopt`）。
-            res.add("门控态", "NA", "origin=adopt 且尚未开户（无 product/prd/）—— "
-                                   "跑 `apply adopt` 开户后再校验")
+            res.add("门控态", "NA",
+                    f"origin=adopt 且尚未开户（无 {lay.print_value('prd')}/）—— "
+                    "跑 `apply adopt` 开户后再校验")
             res.add("总判定", "NA", "origin=adopt 尚未开户")
             return res
-        res.add("参数1 文档头完整", "FAIL", f"缺 {prd}")
+        res.add("参数1 文档头完整", "FAIL", f"缺 {lay.print_value('prd')}/prd.md")
         return res
 
     prd_text = prd.read_text(encoding="utf-8")
@@ -282,7 +322,7 @@ def validate(root: Path) -> Result:
                 illegal.append(f"非标准文件:{item.name}")
     if illegal:
         res.add("参数0 目录规范", "FAIL",
-                f"发现非契约目录层级或非标准文件：{illegal}（契约 rings/prd/reference.md §2 规定 PRD 必须为平铺目录 product/prd/prd.md 与 *-prd.md，严禁子目录）")
+                f"发现非契约目录层级或非标准文件：{illegal}（契约 rings/prd/reference.md §2 规定 PRD 必须为平铺目录 {lay.print_value('prd')}/prd.md 与 *-prd.md，严禁子目录）")
     else:
         res.add("参数0 目录规范", "PASS", "")
 
@@ -296,6 +336,58 @@ def validate(root: Path) -> Result:
                 ("doc", "domain", "domain_name", "domain_code", "version", "date", "status")
                 if not dfm.get(k)]
     res.add("参数1 文档头完整", "PASS" if not bad else "FAIL", f"缺字段={bad}")
+
+    # ---- 变更记录形态（`RFC-20261023-02` ③，2026-10-23；**独立行**：不并入 shape_issues，
+    #      否则 WARN 会被参数 4 聚合为 FAIL）与 可无项显式（同 RFC ④，首版 WARN）。
+    if not domains:
+        res.add("变更记录形态", "NA", "无域级 PRD（门控态 / adopt 未开户）")
+        res.add("可无项显式（§六）", "NA", "无域级 PRD（门控态 / adopt 未开户）")
+    else:
+        legacy, empty_rec, bad_shape, no_explicit = [], [], [], []
+        for d in domains:
+            dtext = d.read_text(encoding="utf-8")
+            sec7 = section_of(dtext, "七")
+            if sec7 is not None:
+                header, rows = _table_rows(sec7)
+                impact_idx = next((i for i, c in enumerate(header) if c.startswith("影响")), None)
+                if not header:
+                    # 节在、表无：legacy 同档 WARN（首版：存量 fixtures / 未迁移项目不首日红）
+                    empty_rec.append(d.name)
+                elif impact_idx is not None:
+                    blanks = [str(n) for n, r in enumerate(rows, 1)
+                              if impact_idx >= len(r) or not r[impact_idx].strip()]
+                    if blanks:
+                        bad_shape.append(f"{d.name} 第 {'/'.join(blanks)} 数据行「影响」为空")
+                elif "变更说明" in header:
+                    legacy.append(d.name)
+                else:
+                    bad_shape.append(f"{d.name} §七 表头不可辨={header}")
+            sec6 = section_of(dtext, "六")
+            if sec6 is not None:
+                # 开户最小集：§六 整节不出现 = 合法（见 prd 契约 §4 开户最小集）；出现即须有结论。
+                if "无" in sec6 or "不适用（理由" in sec6:
+                    continue
+                header6, rows6 = _table_rows(sec6)
+                if not (header6 and rows6):
+                    no_explicit.append(d.name)
+        if bad_shape:
+            res.add("变更记录形态", "FAIL", "；".join(bad_shape))
+        elif legacy or empty_rec:
+            parts = []
+            if legacy:
+                parts.append("legacy 3 列形态=" + ",".join(legacy)
+                             + "（下次真实变更时迁 5 列：版本/日期/变更内容及原因/影响/结论与后续）")
+            if empty_rec:
+                parts.append("§七 变更记录节为空=" + ",".join(empty_rec))
+            res.add("变更记录形态", "WARN", "；".join(parts))
+        else:
+            res.add("变更记录形态", "PASS", "5 列形态齐")
+        if no_explicit:
+            res.add("可无项显式（§六）", "WARN",
+                    "§六 空表/空节且无显式结论=" + ",".join(no_explicit)
+                    + "（写 `无` 或补假设行；翻转触发器见 `rings/prd/reference.md` §7）")
+        else:
+            res.add("可无项显式（§六）", "PASS", "")
 
     # ---- 范围形态声明 / 与 §六 表形态一致 / 最小必填集（契约 §3；结论并入参数 4）
     decl_form, decl_cover, decl_base = (DECL_FORM.search(prd_text), DECL_COVER.search(prd_text),
@@ -547,14 +639,14 @@ def validate(root: Path) -> Result:
 
         # 追溯总表计数对账（契约 §7 参数 4 ⑤；2026-09-28 补，`3509 §B109`）：表里的数字是人
         # 维护的，没有判据就会静默过期（实测七域全过期）。口径 = 按该域 `domain_code` 去重。
-        trace = root / "product" / "prd" / "README.md"
+        trace = lay.prd_dir / "README.md"
         if trace.is_file():
             tr_text = trace.read_text(encoding="utf-8")
             mism = []
             for m in TRACE_ROW.finditer(tr_text):
                 fname = m.group(1)
                 nf, nr, na = int(m.group(2)), int(m.group(3)), int(m.group(4))
-                p = root / "product" / "prd" / fname
+                p = lay.prd_dir / fname
                 if not p.is_file():
                     continue
                 dt = p.read_text(encoding="utf-8")
@@ -594,7 +686,7 @@ def validate(root: Path) -> Result:
         md = re.search(r"^depends_on:\s*\[([^\]]*)\]", dt, re.M)
         dep[slug] = {x.strip().strip("\"'“”") for x in (md.group(1).split(",") if md else [])
                      if x.strip()}
-    gfile = root / "product" / "prd" / "prd.md"
+    gfile = lay.prd_dir / "prd.md"
     gtext = gfile.read_text(encoding="utf-8") if gfile.is_file() else ""
     gsec = re.search(r"^##\s*五、功能架构\s*$(.*?)(?=^##\s|\Z)", gtext, re.S | re.M)
     gmer = re.search(r"```mermaid(.*?)```", gsec.group(1), re.S) if gsec else None

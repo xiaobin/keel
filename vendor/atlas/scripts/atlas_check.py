@@ -16,6 +16,7 @@
   * `--page voices`：只真跑该页（E1 单段：真实应用由业务侧拉起，本器不起任何服务）
   * `--fast`：跳过出厂测试与真跑（只跑校验器 + 生成物）
   * 任一 FAIL ⇒ 退出码 1；WARN 不影响退出码。
+  * 每轮向 `.atlas/runs/check-events.jsonl` 追加一行门名/状态/耗时（观测面，不参与判定；P2，2026-10-23）。
   * 真跑前按**依赖可用性**选解释器（候选须能导入运行器依赖，否则降级；全不可用 ⇒ 真跑 FAIL 并列原因）
 
 - 框架无关：本文件不得出现任何具体框架名。纯标准库。
@@ -37,6 +38,7 @@ from pathlib import Path
 if str(Path(__file__).resolve().parent.parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _support.siblings import load_module  # noqa: E402
+from _support.layout import LayoutError, load_layout  # noqa: E402
 
 # node 运行器单源内核（二进制解析 / **可解析性判据** / 全局兜底修复；issue #24，`DESIGN.md` D101）。
 # 本文件此前与 `scripts/e2e_console.py` 各存一份解析实现（含 `_is_node_playwright` 两份拷贝）。
@@ -58,35 +60,39 @@ VALIDATORS = (
     "validate_prd",
     "validate_design_exemptions",
     "validate_adr",
-)  # E1：validate_prototype 随原型环退役；§B120：stack_profile / structure 纳入；#182：design_exemptions 纳入；§5.8：e2e_mocks 纳入；B209-1（3507 BT）：validate_ac_alignment 纳入；2026-10-13：validate_adr 纳入（架构决策资产门）；2026-10-14：validate_ledger 随知识库/台账子系统退役（AC 号唯一判据归位 validate_prd）
+    "validate_walkthrough",
+)  # E1：validate_prototype 随原型环退役；§B120：stack_profile / structure 纳入；#182：design_exemptions 纳入；§5.8：e2e_mocks 纳入；B209-1（3507 BT）：validate_ac_alignment 纳入；2026-10-13：validate_adr 纳入（架构决策资产门）；2026-10-14：validate_ledger 随知识库/台账子系统退役（AC 号唯一判据归位 validate_prd）；2026-10-23：validate_walkthrough 纳入（M1 走查锁，RFC-20261022-01）
 
 # §B120：三态前置 —— 前置未声明 ⇒ SKIP（不是通过，且必须带原因）；标记存在才真正跑。
-_GATE_PRECONDITIONS = {
-    # 项目未接 atlas（无 stack-profile）/ atlas 自身设计场景（工作区无 product/）⇒ 未走到这一步
-    "validate_stack_profile": (
-        "product/stack-profile.yaml",
-        "前置未声明（未就绪，非失败）：无 product/stack-profile.yaml（项目未接 atlas）"),
-    # 结构环未跑 ⇒ 结构事实区未生成
-    "validate_structure": (
-        ".trellis/spec/structure/_meta.json",
-        "前置未声明（未就绪，非失败）：结构环未跑（无 .trellis/spec/structure/_meta.json）"),
-    # 设计档案未建（frontend-design skill 首次判读时才落盘）⇒ 未走到这一步（#182）
-    "validate_design_exemptions": (
-        "product/design.md",
-        "前置未声明（未就绪，非失败）：无 product/design.md（设计档案未建）"),
-    # E2E 用例资产未建 ⇒ 打桩门无输入面（§5.8，2026-10-12）
-    "validate_e2e_mocks": (
-        "product/e2e/e2e-index.md",
-        "前置未声明（未就绪，非失败）：E2E 用例资产未建（无 product/e2e/e2e-index.md）"),
-    # PRD 资产未建 ⇒ AC 对账门无输入面（B209-1，2026-10-12）
-    "validate_ac_alignment": (
-        "product/prd/prd.md",
-        "前置未声明（未就绪，非失败）：PRD 资产未建（无 product/prd/prd.md）"),
-    # 架构决策资产未建 ⇒ 未走到这一步（2026-10-13）
-    "validate_adr": (
-        "product/adr",
-        "前置未声明（未就绪，非失败）：无 product/adr/（尚未创建任何 ADR）"),
-}
+# 路径随 `atlas.config.yaml` 的资产根解析；配置缺失 ⇒ 默认 product/。
+def _gate_preconditions(root: Path) -> dict[str, tuple[str, str]]:
+    lay = load_layout(root)
+    return {
+        # 项目未接 atlas（无 stack-profile）/ atlas 自身设计场景（工作区无资产根）⇒ 未走到这一步
+        "validate_stack_profile": (
+            lay.print_value("stack_profile"),
+            f"前置未声明（未就绪，非失败）：无 {lay.print_value('stack_profile')}（项目未接 atlas）"),
+        # 结构环未跑 ⇒ 结构事实区未生成
+        "validate_structure": (
+            ".trellis/spec/structure/_meta.json",
+            "前置未声明（未就绪，非失败）：结构环未跑（无 .trellis/spec/structure/_meta.json）"),
+        # 设计档案未建（frontend-design skill 首次判读时才落盘）⇒ 未走到这一步（#182）
+        "validate_design_exemptions": (
+            lay.print_value("design"),
+            f"前置未声明（未就绪，非失败）：无 {lay.print_value('design')}（设计档案未建）"),
+        # E2E 用例资产未建 ⇒ 打桩门无输入面（§5.8，2026-10-12）
+        "validate_e2e_mocks": (
+            lay.print_value("e2e_index"),
+            f"前置未声明（未就绪，非失败）：E2E 用例资产未建（无 {lay.print_value('e2e_index')}）"),
+        # PRD 资产未建 ⇒ AC 对账门无输入面（B209-1，2026-10-12）
+        "validate_ac_alignment": (
+            f"{lay.print_value('prd')}/prd.md",
+            f"前置未声明（未就绪，非失败）：PRD 资产未建（无 {lay.print_value('prd')}/prd.md）"),
+        # 架构决策资产未建 ⇒ 未走到这一步（2026-10-13）
+        "validate_adr": (
+            lay.print_value("adr"),
+            f"前置未声明（未就绪，非失败）：无 {lay.print_value('adr')}/（尚未创建任何 ADR）"),
+    }
 
 GEN_NOT_READY = 3
 
@@ -105,8 +111,11 @@ class Row:
         self.failures: list[dict] = []
 
     def add(self, name: str, status: str, detail: str = "",
-            command: str = "", full_output: str = "", code: int | None = None) -> None:
-        self.rows.append({"name": name, "status": status, "detail": detail})
+            command: str = "", full_output: str = "", code: int | None = None,
+            duration_ms: int | None = None) -> None:
+        # duration_ms 是观测字段，不参与任何判据；None = 该行没有可计时的执行段，或尚未接入计时。
+        self.rows.append({"name": name, "status": status, "detail": detail,
+                          "duration_ms": duration_ms})
         if status == "FAIL":
             self.failures.append({
                 "name": name,
@@ -175,17 +184,35 @@ def port_free(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) != 0
 
 
+def _elapsed_ms(start: float) -> int:
+    return int((time.perf_counter() - start) * 1000)
+
+
+def check_layout(root: Path, rows: Row) -> bool:
+    """布局配置是全部资产门的共同前置；非法 ⇒ 单行 FAIL，依赖门不重复报红。"""
+    try:
+        lay = load_layout(root)
+    except LayoutError as exc:
+        rows.add("项目布局配置", "FAIL", str(exc))
+        return False
+    for warning in lay.warnings():
+        rows.add(f"布局提示（{warning['code']}）", "WARN", warning["detail"])
+    return True
+
+
 def check_validators(root: Path, rows: Row, py: str) -> None:
     for v in VALIDATORS:
         script = root / ".atlas" / "validators" / f"{v}.py"
         if not script.is_file():
             rows.add(v, "SKIP", "校验器不存在")
             continue
-        pre = _GATE_PRECONDITIONS.get(v)
+        pre = _gate_preconditions(root).get(v)
         if pre is not None and not (root / pre[0]).exists():
             rows.add(v, "SKIP", pre[1])
             continue
+        started = time.perf_counter()
         code, out = run([py, str(script), "--root", "."], root)
+        duration_ms = _elapsed_ms(started)
         last = [l.strip() for l in out.strip().splitlines() if l.strip()]
         status = "ok" if code == 0 else "FAIL"
         tail = last[-1] if last else ""
@@ -194,15 +221,16 @@ def check_validators(root: Path, rows: Row, py: str) -> None:
             bad = [l for l in last if "[FAIL]" in l or "[WARN]" in l]
             detail = "; ".join(bad) if bad else tail
             rows.add(v, status, detail or tail,
-                     command=f"{py} {script} --root .", full_output=out, code=code)
+                     command=f"{py} {script} --root .", full_output=out, code=code,
+                     duration_ms=duration_ms)
         elif any("[WARN]" in l for l in last):
             # WARN = 提示补不置红（退出码 0），但门总览必须可见，不得静默当 ok
             status = "WARN"
             bad = [l for l in last if "[WARN]" in l]
             detail = "; ".join(bad) if bad else tail
-            rows.add(v, status, detail or tail)
+            rows.add(v, status, detail or tail, duration_ms=duration_ms)
         else:
-            rows.add(v, status, tail)
+            rows.add(v, status, tail, duration_ms=duration_ms)
 
 
 def check_factory(root: Path, rows: Row, py: str) -> None:
@@ -221,11 +249,14 @@ def check_factory(root: Path, rows: Row, py: str) -> None:
                  "包自检在源包跑（pytest tests）；项目侧跑齐 = 重装取新发行版装配"
                  "（install.sh / atlas upgrade，需解释器可跑 pytest）")
         return
+    started = time.perf_counter()
     code, out = run([py, "-m", "pytest", ".atlas/tests", "-q", "--no-header"], root, timeout=900)
+    duration_ms = _elapsed_ms(started)
     m = re.findall(r"(\d+) (passed|failed)", out)
     summary = " ".join(f"{n} {k}" for n, k in m) or out.strip().splitlines()[-1:][0] if out.strip() else ""
     rows.add("对齐测试(.atlas/tests)", "ok" if code == 0 else "FAIL", summary[:160],
-             command=f"{py} -m pytest .atlas/tests -q --no-header", full_output=out, code=code)
+             command=f"{py} -m pytest .atlas/tests -q --no-header", full_output=out, code=code,
+             duration_ms=duration_ms)
 
 
 def check_serial_execution(root: Path, rows: Row) -> None:
@@ -235,22 +266,27 @@ def check_serial_execution(root: Path, rows: Row) -> None:
     同域用例必须按序串行（零步基线先于改态用例）；并行调度会打乱定义序 ⇒ 恒真误报 / 前提被前序污染。
     手改配置或封装运行方式注入并行 ⇒ **FAIL**（正确性纪律，不是「过期」的新鲜度问题 ⇒ 不降 WARN）。
     """
-    cfg = root / "product" / "e2e" / "scripts" / "playwright.config.ts"
+    cfg = load_layout(root).e2e_scripts_dir / "playwright.config.ts"
     if not cfg.is_file():
-        rows.add("执行串行", "SKIP", "无 product/e2e/scripts/playwright.config.ts（E2E 资产未建）")
+        rows.add("执行串行", "SKIP",
+                 f"无 {load_layout(root).print_value('e2e_scripts')}/playwright.config.ts（E2E 资产未建）")
         return
+    started = time.perf_counter()
     text = cfg.read_text(encoding="utf-8", errors="ignore")
     missing = []
     if not re.search(r"\bworkers\s*:\s*1\b", text):
         missing.append("workers: 1")
     if not re.search(r"\bfullyParallel\s*:\s*false\b", text):
         missing.append("fullyParallel: false")
+    duration_ms = _elapsed_ms(started)
     if missing:
         rows.add("执行串行", "FAIL",
                  "运行器配置未串行：缺 " + " / ".join(missing) +
-                 "（契约 §7.1：同域用例必须按序串行；共享有状态靶场并行会污染前提）")
+                 "（契约 §7.1：同域用例必须按序串行；共享有状态靶场并行会污染前提）",
+                 duration_ms=duration_ms)
     else:
-        rows.add("执行串行", "ok", "workers: 1 + fullyParallel: false")
+        rows.add("执行串行", "ok", "workers: 1 + fullyParallel: false",
+                 duration_ms=duration_ms)
 
 
 def check_generated(root: Path, rows: Row, py: str) -> None:
@@ -258,7 +294,9 @@ def check_generated(root: Path, rows: Row, py: str) -> None:
     if not gen.is_file():
         rows.add("生成物最新", "SKIP", "生成器不存在")
         return
+    started = time.perf_counter()
     code, out = run([py, str(gen), "--root", ".", "--json"], root)
+    duration_ms = _elapsed_ms(started)
     if code == GEN_NOT_READY:
         # 前置未声明（例：e2e.app_base_url 为空）= **未就绪**，不是失败：显式可见跳过 + 说清怎么变成可跑。
         # 三态语义（`3509 §B110`）：未就绪(SKIP) ≠ 生成物过期(WARN) ≠ 生成失败(FAIL)。
@@ -274,11 +312,13 @@ def check_generated(root: Path, rows: Row, py: str) -> None:
                 continue
         if not why:
             why = out.strip().splitlines()[-1][:160] if out.strip() else ""
-        rows.add("生成物最新", "SKIP", f"前置未声明（未就绪，非失败）：{why[:150]}")
+        rows.add("生成物最新", "SKIP", f"前置未声明（未就绪，非失败）：{why[:150]}",
+                 duration_ms=duration_ms)
         return
     if code != 0:
         rows.add("生成物最新", "FAIL", out.strip().splitlines()[-1][:160] if out.strip() else "",
-                 command=f"{py} {gen} --root . --json", full_output=out, code=code)
+                 command=f"{py} {gen} --root . --json", full_output=out, code=code,
+                 duration_ms=duration_ms)
         return
     info = None
     for blob in (out, (re.search(r"\{.*\}", out, re.S).group(0) if re.search(r"\{.*\}", out, re.S) else "")):
@@ -291,16 +331,18 @@ def check_generated(root: Path, rows: Row, py: str) -> None:
         except Exception:
             continue
     if info is None or not isinstance(info, dict):
-        rows.add("生成物最新", "WARN", "生成器输出非 JSON")
+        rows.add("生成物最新", "WARN", "生成器输出非 JSON", duration_ms=duration_ms)
         return
     stale = [r["file"] for r in info.get("results", []) if r.get("changed")]
     if stale:
         rows.add("生成物最新", "WARN", "%d 个产物待重跑 gen_e2e_scripts.py --apply（例：%s）"
-                 % (len(stale), Path(stale[0]).name))
+                 % (len(stale), Path(stale[0]).name), duration_ms=duration_ms)
     elif "基线报告兜底中" in out:
-        rows.add("生成物最新", "WARN", "独立审查未执行（基线报告兜底中；跑 gen_e2e_scripts.py --bootstrap-review）")
+        rows.add("生成物最新", "WARN", "独立审查未执行（基线报告兜底中；跑 gen_e2e_scripts.py --bootstrap-review）",
+                 duration_ms=duration_ms)
     else:
-        rows.add("生成物最新", "ok", "%d 个页面脚本与索引反向视图均已最新" % info.get("generated", 0))
+        rows.add("生成物最新", "ok", "%d 个页面脚本与索引反向视图均已最新" % info.get("generated", 0),
+                 duration_ms=duration_ms)
 
 
 def check_review_report(root: Path, rows: Row) -> None:
@@ -311,9 +353,10 @@ def check_review_report(root: Path, rows: Row) -> None:
     - 形态门通过：ok
     - 形态门失败（如手写假桩缺字段、映射自相矛盾）：FAIL 揭发伪造证据
     """
-    reviews_dir = root / "product" / "e2e" / "reviews"
+    lay = load_layout(root)
+    reviews_dir = lay.e2e_reviews_dir
     if not reviews_dir.is_dir():
-        rows.add("审查报告形态", "SKIP", "无 product/e2e/reviews 目录")
+        rows.add("审查报告形态", "SKIP", f"无 {lay.print_value('e2e_reviews')} 目录")
         return
     review_re = re.compile(r"^(\d{4}-\d{2}-\d{2})-(.+)$")
     candidates = [p for p in reviews_dir.iterdir() if p.is_dir() and review_re.match(p.name)]
@@ -330,14 +373,19 @@ def check_review_report(root: Path, rows: Row) -> None:
         rows.add("审查报告形态", "SKIP", "无 scripts/validate_review_report.py")
         return
 
+    started = time.perf_counter()
     res = validate_report(latest)
+    duration_ms = _elapsed_ms(started)
     if res.status == "FAIL":
         fails = [c["check"] for c in res.checks if c.get("level") == "FAIL"]
-        rows.add("审查报告形态", "FAIL", f"{latest.name} 形态不合规（例：{fails[:2]}）")
+        rows.add("审查报告形态", "FAIL", f"{latest.name} 形态不合规（例：{fails[:2]}）",
+                 duration_ms=duration_ms)
     elif res.status == "WARN":
-        rows.add("审查报告形态", "WARN", f"{latest.name} 处于未审基线或含警告（状态={res.status}）")
+        rows.add("审查报告形态", "WARN", f"{latest.name} 处于未审基线或含警告（状态={res.status}）",
+                 duration_ms=duration_ms)
     else:
-        rows.add("审查报告形态", "ok", f"{latest.name} 形态合规且状态一致")
+        rows.add("审查报告形态", "ok", f"{latest.name} 形态合规且状态一致",
+                 duration_ms=duration_ms)
 
 
 def check_drift(root: Path, rows: Row) -> None:
@@ -364,14 +412,16 @@ def check_drift(root: Path, rows: Row) -> None:
     if not marker.is_file():
         rows.add("结构漂移", "ok", "最近一次事实刷新无键级增删")
         return
+    started = time.perf_counter()
     try:
         d = json.loads(marker.read_text(encoding="utf-8"))
         drifts = d.get("drifts") or []
     except (OSError, json.JSONDecodeError):
-        rows.add("结构漂移", "WARN", "漂移标记不可解析（.adapter-out/_drift.json）")
+        rows.add("结构漂移", "WARN", "漂移标记不可解析（.adapter-out/_drift.json）",
+                 duration_ms=_elapsed_ms(started))
         return
     if not drifts:
-        rows.add("结构漂移", "ok", "漂移标记为空")
+        rows.add("结构漂移", "ok", "漂移标记为空", duration_ms=_elapsed_ms(started))
         return
     parts = []
     for x in drifts[:3]:
@@ -380,7 +430,24 @@ def check_drift(root: Path, rows: Row) -> None:
         parts.append(f"{x.get('kind', '?')} +{add} -{rem}")
     more = "" if len(drifts) <= 3 else f"（共 {len(drifts)} 处）"
     rows.add("结构漂移", "WARN",
-             f"最近一次事实刷新检测到未登记键级变更（.adapter-out/_drift.json）：{'；'.join(parts)}{more}")
+             f"最近一次事实刷新检测到未登记键级变更（.adapter-out/_drift.json）：{'；'.join(parts)}{more}",
+             duration_ms=_elapsed_ms(started))
+
+
+def _parse_manifest(path: Path) -> dict | None:
+    """读 `.atlas/MANIFEST.json`：`{digest: str, files: {rel: sha256}}` 两键齐才认。
+
+    形态非法返回 None（调用方据此给「形态非法」WARN，不猜、不静默）。
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (isinstance(data, dict) and isinstance(data.get("digest"), str)
+            and isinstance(data.get("files"), dict)
+            and all(isinstance(k, str) and isinstance(v, str) for k, v in data["files"].items())):
+        return data
+    return None
 
 
 def check_version(root: Path, rows: Row) -> None:
@@ -395,6 +462,13 @@ def check_version(root: Path, rows: Row) -> None:
     安装的源包位于 `<prefix>/lib/node_modules/<pkg>` ⇒ 每个文件都被滤掉 ⇒ 空摘要落戳，
     而副本侧同错重算 ⇒ 两侧恒等 ⇒ 本门恒 ok。修后 `digest()` 对空装配直接抛
     `EmptyAssembly`，故该哨兵只可能对应「修复前落的戳」。
+
+    `RFC-20261023-02` ②（2026-10-23）：`.atlas/MANIFEST.json` 装配基线（逐文件摘要）。
+    * **配对校验先行**：manifest.digest ≠ 装配戳 ⇒ 半态，退聚合口径并指名重装
+      （写序「先 MANIFEST 后 VERSION」保证 VERSION 在场即 manifest 已齐，B1）；
+    * 配对成立且漂移 ⇒ **逐文件指名**（改/增/删，各 cap 10 + 计数）；
+    * 旧装配无 manifest ⇒ 聚合口径 + ok 行尾注「正式判据未齐」（status 仍 ok）；
+    * 两分支 WARN 文案均保留 M68 三词（`atlas upgrade` / `install.sh` / `backflow`）。
     """
     version_file = root / ".atlas" / "VERSION"
     if not version_file.is_file():
@@ -416,38 +490,131 @@ def check_version(root: Path, rows: Row) -> None:
         return
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from pkg_digest import EmptyAssembly, digest  # noqa: E402  延迟导入：旧装配无此文件时走 SKIP
+        from pkg_digest import EmptyAssembly, manifest  # noqa: E402  延迟导入：旧装配无此文件时走 SKIP
     except ImportError:
         rows.add("装配版本", "SKIP",
                  "无 scripts/pkg_digest.py 或版本过旧（无 EmptyAssembly）——重跑 install.sh 补齐")
         return
+    started = time.perf_counter()
     try:
-        current = digest(source_dir)
+        current = manifest(source_dir)
     except EmptyAssembly as e:
         # 独立子句且**排在 (OSError, ValueError) 之前**：EmptyAssembly 是 ValueError 子类，
         # 并进同一个 tuple 会被当成 SKIP，而「装配集为空」绝不是合法降级。
-        rows.add("装配版本", "WARN", f"装配集为空，摘要不可信（{e}）——源包疑似不完整，重跑 install.sh")
+        rows.add("装配版本", "WARN", f"装配集为空，摘要不可信（{e}）——源包疑似不完整，重跑 install.sh",
+                 duration_ms=_elapsed_ms(started))
         return
     except (OSError, ValueError) as e:
-        rows.add("装配版本", "SKIP", f"源包摘要计算失败（{e}）")
+        rows.add("装配版本", "SKIP", f"源包摘要计算失败（{e}）",
+                 duration_ms=_elapsed_ms(started))
         return
-    if current == stamped:
-        rows.add("装配版本", "ok", f"源包与装配态一致（{stamped}）")
+    duration_ms = _elapsed_ms(started)
+
+    manifest_file = root / ".atlas" / "MANIFEST.json"
+    recorded = _parse_manifest(manifest_file) if manifest_file.is_file() else None
+    if manifest_file.is_file() and recorded is None:
+        rows.add("装配版本", "WARN",
+                 ".atlas/MANIFEST.json 形态非法（应为 {digest, files} 两键）——"
+                 "重跑 install.sh 补齐；源包侧 `atlas upgrade` / `install.sh` 落戳，"
+                 "细节走 `backflow.py` 三态对账",
+                 duration_ms=duration_ms)
+        return
+    if recorded is not None:
+        if recorded["digest"] != stamped:
+            rows.add("装配版本", "WARN",
+                     f"manifest 与 VERSION 不配套（manifest {recorded['digest']} ≠ 装配戳 {stamped}）"
+                     "——半态装配，重跑 install.sh；`atlas upgrade` / `install.sh` 落戳后 "
+                     "`backflow.py` 可对账细节",
+                     duration_ms=duration_ms)
+            return
+        if current["digest"] == stamped:
+            rows.add("装配版本", "ok",
+                     f"源包与装配态一致（{stamped}，{len(current['files'])} 文件基线齐）",
+                     duration_ms=duration_ms)
+            return
+        old, new = recorded["files"], current["files"]
+        changed = sorted(k for k in set(old) & set(new) if old[k] != new[k])
+        added = sorted(set(new) - set(old))
+        removed = sorted(set(old) - set(new))
+
+        def _name(keys: list[str]) -> str:
+            shown = "、".join(keys[:10])
+            return shown + (f" 等 {len(keys)} 项" if len(keys) > 10 else "")
+
+        named = []
+        if changed:
+            named.append("改=" + _name(changed))
+        if added:
+            named.append("增=" + _name(added))
+        if removed:
+            named.append("删=" + _name(removed))
+        if not named:
+            named.append("摘要不一致但逐文件无差异（manifest 与摘要算法不同代）——重跑 install.sh")
+        rows.add("装配版本", "WARN",
+                 f"源包已前进/落后于装配态（装配 {stamped} → 当前 {current['digest']}）："
+                 f"改 {len(changed)} / 增 {len(added)} / 删 {len(removed)}；" + "；".join(named)
+                 + "。生效：npm 全局源包态 `atlas upgrade` 后在项目里跑 `atlas update`；"
+                 "本地源仓态重跑 `install.sh`；差异明细跑 `backflow.py` 三态对账"
+                 "（SOURCE_ONLY 拒绝护栏；D79 ⑤）",
+                 duration_ms=duration_ms)
+        return
+
+    # 旧装配（VERSION 在场、manifest 缺）：干净的历史语义，不新增红；聚合口径 + 补装提示。
+    if current["digest"] == stamped:
+        rows.add("装配版本", "ok",
+                 f"源包与装配态一致（{stamped}）；旧装配无 manifest——正式判据未齐，重跑 install.sh 补",
+                 duration_ms=duration_ms)
         return
     rows.add("装配版本", "WARN",
-             f"源包已前进/落后于装配态（装配 {stamped} → 当前 {current}）——"
+             f"源包已前进/落后于装配态（装配 {stamped} → 当前 {current['digest']}）；"
+             "旧装配无 manifest（无法逐文件指名）——重跑 install.sh 补齐。"
              "生效：npm 全局源包态 `atlas upgrade` 后在项目里跑 `atlas update`；"
              "本地源仓态重跑 `install.sh`；差异明细跑 `backflow.py` 三态对账"
-             "（SOURCE_ONLY 拒绝护栏；D79 ⑤）")
+             "（SOURCE_ONLY 拒绝护栏；D79 ⑤）",
+             duration_ms=duration_ms)
+
+
+def check_write_claims(root: Path, rows: Row) -> None:
+    """「写面残留」门（M3，`RFC-20261022-01` 批 3；`apply/reference.md` §5.1）。
+
+    只 glob `.atlas/runs/write-claims/*.json`：有未释放的 claim ⇒ WARN 指名
+    （任务完成后的收口应 `write_claim.py release`；残留 = 收口漏了一步）。
+    这是**提醒面不是门禁**：残留不影响退出码——`validate_e2e_index` 的事后兜底
+    保留不撤（D 类不一致仍由它咬）。
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from write_claim import scan_residuals  # noqa: E402  单源：落点/格式只此一处
+    except ImportError:
+        rows.add("写面残留", "SKIP", "无 scripts/write_claim.py（旧装配；纪律照旧）")
+        return
+    try:
+        residuals = scan_residuals(root)
+    except OSError as e:
+        rows.add("写面残留", "SKIP", f"claims 目录不可读（{e}）")
+        return
+    if not residuals:
+        rows.add("写面残留", "ok", "无未释放的写面 claim")
+        return
+    parts = [f"{x['file']}（{x['task']}）" for x in residuals[:3]]
+    more = "" if len(residuals) <= 3 else f"…共 {len(residuals)} 个"
+    rows.add("写面残留", "WARN",
+             f"{len(residuals)} 个未释放的写面 claim：{'；'.join(parts)}{more}"
+             "（确认任务已完成 ⇒ `write_claim.py release --file <路径>`；"
+             "claims 是运行态，不进 git 历史）")
 
 
 def check_e2e(root: Path, rows: Row, page: str | None) -> None:
-    prof = root / "product" / "stack-profile.yaml"
+    # 整门 wall time：含 reset / TCP 探测 / runner / browser probe / 真跑；
+    # 早退 SKIP 行没有执行段，duration_ms 保持 None。
+    started_gate = time.perf_counter()
+    lay = load_layout(root)
+    prof = lay.stack_profile
     text = prof.read_text(encoding="utf-8") if prof.is_file() else ""
     # 值抽取正则只用 `[^\S\n]`（同行空白），不得用 `\s`——`\s` 会跨行匹配，把下一行的
     # 键名当成值（2026-10-04 门禁负向用例 #2：`app_base_url:` 空值后跟 `reset:` ⇒ 被误读成已声明）。
     m = re.search(r"^[^\S\n]*cases_dir:[^\S\n]*(\S+)", text, re.M)
-    scripts = root / "product" / "e2e" / "scripts"
+    scripts = lay.e2e_scripts_dir
     if not scripts.is_dir():
         rows.add("E2E 真跑", "SKIP", "无脚本目录（门控态）")
         return
@@ -482,10 +649,11 @@ def check_e2e(root: Path, rows: Row, page: str | None) -> None:
         if code_r != 0:
             rows.add("E2E 真跑" + (f"[{page}]" if page else "（六页）"), "FAIL",
                      f"e2e.reset 失败（exit {code_r}）：{out_r.strip()[-200:]}",
-                     command=reset_cmd, full_output=out_r, code=code_r)
+                     command=reset_cmd, full_output=out_r, code=code_r,
+                     duration_ms=_elapsed_ms(started_gate))
             return
     # node 单轨（3507 BO）：运行器解析 + **可解析性判据**（issue #24，`DESIGN.md` D101）。
-    # 判据本体 = 「从 `product/e2e/scripts/` 出发 `@playwright/test` 可解析」——
+    # 判据本体 = 「从 `资产根/e2e/scripts/` 出发 `@playwright/test` 可解析」——
     # 即 `gates.md` 2.2 本行早写明的「按**依赖可导入性**，不按路径存在」；
     # 二进制存在只是必要条件（此前把它当充要条件 ⇒ ESM 项目上「找得到 bin、解析不到模块」半生效，
     # 错误落到运行期并被计成「跑失败 / 无结果」）。解析/探针/修复全走单源内核 `_support/pw_runner.py`。
@@ -497,7 +665,8 @@ def check_e2e(root: Path, rows: Row, page: str | None) -> None:
         hint = f"（提示：请在 {nm_rel.parent if nm_rel else '.'} 执行 npm i -D {pw_runner.MODULE_SPEC}）"
         rows.add("E2E 真跑", "FAIL",
                  f"node-playwright 可执行文件不存在：{disp_bin}（stack-profile e2e.node_modules）{hint}",
-                 command="", full_output=f"pw_bin not found: {pw_bin}\n提示：请先在对应目录安装 {pw_runner.MODULE_SPEC}")
+                 command="", full_output=f"pw_bin not found: {pw_bin}\n提示：请先在对应目录安装 {pw_runner.MODULE_SPEC}",
+                 duration_ms=_elapsed_ms(started_gate))
         return
     # 判据本体（与执行器同一实现、同一修复）：不成立 ⇒ 先试全局兜底修复，复检仍不过 ⇒ FAIL。
     # 修复成功 ⇒ 真跑能跑，但结论依赖**机器全局状态**（非项目自足）⇒ 降为 WARN 并在行内写明。
@@ -506,7 +675,8 @@ def check_e2e(root: Path, rows: Row, page: str | None) -> None:
     if runner_status == "fail":
         rows.add("E2E 真跑", "FAIL",
                  f"node 运行器判据不成立：{runner_detail}（判据 = 依赖可导入性，不按路径存在；gates.md 2.2）",
-                 command="", full_output=f"probe failed at {scripts}\n{runner_detail}")
+                 command="", full_output=f"probe failed at {scripts}\n{runner_detail}",
+                 duration_ms=_elapsed_ms(started_gate))
         return
     # 浏览器就绪判据（issue #38，`DESIGN.md` D124）：模块可解析 ≠ launch 可成——npm 装包不自动
     # 下载浏览器，缺 ⇒ launch 阶段才炸，门此前已判「就绪」= 谎报（错误落到 Playwright 内部报错、
@@ -518,7 +688,8 @@ def check_e2e(root: Path, rows: Row, page: str | None) -> None:
     if not br_ok:
         rows.add("E2E 真跑", "FAIL",
                  f"node 浏览器判据不成立：{br_detail}",
-                 command="", full_output=f"browser probe at {scripts}\n{br_detail}")
+                 command="", full_output=f"browser probe at {scripts}\n{br_detail}",
+                 duration_ms=_elapsed_ms(started_gate))
         return
     spec_arg = f"{page}.spec.ts" if page else ""
     node_path_env = f"NODE_PATH={node_path} " if node_path else ""
@@ -607,7 +778,58 @@ def check_e2e(root: Path, rows: Row, page: str | None) -> None:
         summary = f"{summary} ｜ {runner_note}" + (f"（{runner_detail}）" if runner_detail else "")
     rows.add("E2E 真跑" + (f"[{page}]" if page else "（六页）"),
              level, summary,
-             command=cmd, full_output=full_err_output, code=code)
+             command=cmd, full_output=full_err_output, code=code,
+             duration_ms=_elapsed_ms(started_gate))
+
+
+def _git_state(root: Path) -> tuple[str, bool | None]:
+    head, dirty = "unknown", None
+    try:
+        p = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(root),
+                           capture_output=True, text=True, timeout=5)
+        if p.returncode == 0:
+            head = p.stdout.strip()
+        # `.atlas/` 是运行态 / 装配产物，不参与「仓库是否脏」的判定；否则首次运行
+        # 写事件行后 git_dirty 会从 false 变 true（采纳项目通常整目录未跟踪 ⇒ 恒 true）。
+        p = subprocess.run(["git", "status", "--porcelain", "--", ".", ":(exclude).atlas"],
+                           cwd=str(root), capture_output=True, text=True, timeout=5)
+        if p.returncode == 0:
+            dirty = bool(p.stdout.strip())
+    except Exception:
+        pass
+    return head, dirty
+
+
+def _write_check_event(root: Path, rows: Row, *, fast: bool, page: str | None) -> None:
+    """每轮追加一行运行事件（**观测面，不参与判定**；P2，2026-10-23）。
+
+    字段只有门名 / 状态 / 耗时 / 仓库态，不含业务内容（零业务上下文）。
+    写失败不影响门禁结论——观测面坏了不能反过来把检查判红。
+    """
+    head, dirty = _git_state(root)
+    payload = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "git_head": head,
+        "git_dirty": dirty,
+        "ok": not rows.failed,
+        "fast": fast,
+        "page": page,
+        "ablation_id": os.environ.get("ATLAS_ABLATION_ID") or None,
+        "rows": [
+            {"name": r["name"], "status": r["status"],
+             "duration_ms": r.get("duration_ms")}
+            for r in rows.rows
+        ],
+    }
+    path = root / ".atlas" / "runs" / "check-events.jsonl"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            # ensure_ascii=True：事件里可能出现非 ASCII 的 page / ablation_id；
+            # 不允许它因编码/序列化异常把检查判红。写失败只吞掉（观测面不是门）。
+            f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    except Exception:
+        pass
 
 
 def main() -> int:
@@ -619,16 +841,21 @@ def main() -> int:
     args = ap.parse_args()
     root = Path(args.root).resolve()
     rows = Row()
-    check_validators(root, rows, sys.executable)
-    if not args.fast:
-        check_factory(root, rows, sys.executable)
-    check_generated(root, rows, sys.executable)
-    check_review_report(root, rows)
-    check_serial_execution(root, rows)
-    check_drift(root, rows)
-    check_version(root, rows)
-    if not args.fast:
-        check_e2e(root, rows, args.page)
+    layout_ok = check_layout(root, rows)
+    if layout_ok:
+        check_validators(root, rows, sys.executable)
+        if not args.fast:
+            check_factory(root, rows, sys.executable)
+        check_generated(root, rows, sys.executable)
+        check_review_report(root, rows)
+        check_serial_execution(root, rows)
+        check_drift(root, rows)
+        check_version(root, rows)
+        check_write_claims(root, rows)
+        if not args.fast:
+            check_e2e(root, rows, args.page)
+
+    _write_check_event(root, rows, fast=args.fast, page=args.page)
 
     error_log = root / ".atlas" / "runs" / "last-check-error.log"
     if rows.failed:

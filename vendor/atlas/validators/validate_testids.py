@@ -37,6 +37,7 @@ from pathlib import Path
 if str(Path(__file__).resolve().parents[1]) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _support.siblings import load_module  # noqa: E402
+from _support.layout import LayoutError, load_layout  # noqa: E402
 
 parse_block = load_module("case_block").parse_block
 
@@ -101,7 +102,11 @@ ORIGINS = ("greenfield", "adopt")
 DEFAULT_ORIGIN = "greenfield"
 FRONTEND_KINDS = ("frontend", "fullstack")
 SKIP_DIRS = {"node_modules", ".git", "dist", "build", ".next", "coverage", "__pycache__",
-             ".venv", "venv", "vendor", ".cache", "out", "target"}
+             ".venv", "venv", "vendor", ".cache", "out", "target",
+             # 运行期产物目录(2026-10-25,合成靶场 D150 咬合批发现):失败批的 error-context.md /
+             # trace 快照文本里含 testid 字面 ⇒ 不排除则下一批 validate(先于 playwright 清空
+             # 执行)会扫出「testid 重复」假红。产物是**回声**,与测试文件同族。
+             ".atlas-run", "test-results", "playwright-report", ".atlas", ".trellis", ".verify"}
 # 测试文件/目录**不入实然集合**（issue #27/#33，2026-10-19）：单元测试与夹具里的
 # `querySelector('[data-testid=x]')` 是页面元素的**回声**，不是声明处 —— 计进「声明处计数」
 # 会把「真实元素 + 自身测试文件里的同名字符串」判成全站重复假红（同文件重复 WARN 同理）。
@@ -117,13 +122,13 @@ PAGE_STATES = ("已实现", "实现中", "未开始")
 DEFAULT_PAGE_STATE = "已实现"
 
 
-def index_page_states(root: Path) -> dict[str, str] | None:
+def index_page_states(root: Path, lay=None) -> dict[str, str] | None:
     """页清单 + 实现状态 ← 索引**页面表**（契约 §3.2，E1 起页 ↔ 路由的唯一真相源）。
 
     返回 `{slug: 状态}`；**无页面表 ⇒ `None`**（调用方退化为分片名并记 WARN）。
     状态列缺失 ⇒ 该页取 `DEFAULT_PAGE_STATE`（已实现）——缺列不得静默放宽（`3509 §B106`）。
     """
-    idx = root / "product" / "e2e" / "e2e-index.md"
+    idx = (lay or load_layout(root)).e2e_index
     if not idx.is_file():
         return None
     states: dict[str, str] = {}
@@ -163,13 +168,13 @@ def page_of(path: Path) -> str:
     return path.stem
 
 
-def read_origin(root: Path) -> str:
-    """读 `product/stack-profile.yaml` 顶层的 `origin:`（单标量，不引第三方 YAML）。
+def read_origin(root: Path, lay=None) -> str:
+    """读 `资产根/stack-profile.yaml` 顶层的 `origin:`（单标量，不引第三方 YAML）。
 
     缺省 = `greenfield`：与 `validate_stack_profile.py` 同一默认，**保持既有行为**
     （不因未声明而静默切换形态）。词表与那个校验器同源，出厂测试守恒。
     """
-    p = root / "product" / "stack-profile.yaml"
+    p = (lay or load_layout(root)).stack_profile
     if not p.is_file():
         return DEFAULT_ORIGIN
     for raw in p.read_text(encoding="utf-8").splitlines():
@@ -180,12 +185,12 @@ def read_origin(root: Path) -> str:
     return DEFAULT_ORIGIN
 
 
-def app_globs(root: Path) -> list[str]:
+def app_globs(root: Path, lay=None) -> list[str]:
     """`stack-profile.yaml` 里 `kind ∈ {frontend, fullstack}` 的 app **路径**（真 UI 源文件的搜索根）。
 
     手写行级解析（不引第三方 YAML）：只认 `apps:` 段内由 `- name:` 开启的块里的 `path` / `kind`。
     """
-    p = root / "product" / "stack-profile.yaml"
+    p = (lay or load_layout(root)).stack_profile
     if not p.is_file():
         return []
     out: list[dict] = []
@@ -376,6 +381,7 @@ def shard_landings(cases: Path, proto_pages: list[str] | None = None) -> dict[st
 
 def collect_testids_expanded(
     root: Path, globs: list | None = None, tpl_patterns_out: list[re.Pattern] | None = None,
+    lay=None,
 ) -> tuple[dict[str, set[str]], dict[str, int], list[str], set[str], dict[str, list[str]]]:
     """扫**前端源码**取 testid 实然集合（E1 统一，不再按 origin 分流）：
     `(按页归集, 全站声明文件数计数, 扫到的源文件, 模板展开值全集, 同文件字面量重复清单)`。
@@ -393,17 +399,19 @@ def collect_testids_expanded(
     全站唯一是「跨文件重复」判据，同文件内模板壳与命令式赋值混用不误伤；同文件字面量重复单独 WARN 报警。
     **展开值的挂载范围静态未知**（外壳可能只挂载部分页），故展开值**只参与「缺失」判罚、不参与「多余」判罚**。
     """
-    cases = root / "product" / "e2e" / "cases"
+    lay = lay or load_layout(root)
+    cases = lay.e2e_cases_dir
     shard_pages = sorted(p.stem for p in cases.glob("*.md")) if cases.is_dir() else []
     files = _scan_files([root / g for g in (globs or [])])
-    texts = [(f, f.read_text(encoding="utf-8", errors="ignore")) for f in files]
+    # 剥注释只做一次：第一次循环就把 clean 文本存进 texts，第二次循环复用。
+    # 此前每文件调两次 strip_comments（同一份文本，纯重复）；输出逐字不变，实测省约 110ms/14%（P5-A，D141）。
+    texts = [(f, strip_comments(f.read_text(encoding="utf-8", errors="ignore"))) for f in files]
     all_tids: set[str] = set()
-    for _f, text in texts:
-        clean = strip_comments(text)
+    for _f, clean in texts:
         all_tids.update(TESTID_ATTR.findall(clean))
         all_tids.update(DATASET_TESTID.findall(clean))
         all_tids.update(SETATTR_TESTID.findall(clean))
-    states = index_page_states(root)
+    states = index_page_states(root, lay)
     if states:
         pages = sorted(set(states) | set(shard_pages))
     else:
@@ -412,8 +420,7 @@ def collect_testids_expanded(
     counts: dict[str, int] = {}
     expanded: set[str] = set()
     same_file_dups: dict[str, list[str]] = {}
-    for f, text in texts:
-        clean_text = strip_comments(text)
+    for f, clean_text in texts:
         rel = f.relative_to(root).as_posix()
         # 单源：与「应然落点」门共用（见 file_testid_decls）
         file_unique, static_occ, tpl_values = file_testid_decls(clean_text, pages)
@@ -471,7 +478,7 @@ def shard_testids(cases: Path, proto_pages: list[str] | None = None) -> dict[str
 
 
 # 契约 §5.5：这两个动作没有 testid（`goto` 取路径、`refresh` 无参）。
-_NO_TID_VERBS = {"goto", "refresh"}
+_NO_TID_VERBS = {"goto", "refresh", "request"}  # D142：request 的第二个 token 是 api 后缀，不是 testid
 
 
 def case_testid_usage(md: Path) -> list[tuple[str, set[str], set[str]]]:
@@ -516,8 +523,13 @@ def case_testid_usage(md: Path) -> list[tuple[str, set[str], set[str]]]:
 
 def validate(root: Path) -> Result:
     res = Result()
-    cases = root / "product" / "e2e" / "cases"
-    globs = app_globs(root)
+    try:
+        lay = load_layout(root)
+    except LayoutError as exc:
+        res.add("项目布局配置", "FAIL", str(exc))
+        return res
+    cases = lay.e2e_cases_dir
+    globs = app_globs(root, lay)
 
     # 门控态：抽取源或用例目录缺一 —— 本环无输入（本环比的是**两个集合**，缺一侧就没得比）。
     # 注意抽取源要**真的在磁盘上**（只看 globs 已声明会把「刚接入、代码还没落地」误判为有输入）。
@@ -554,8 +566,8 @@ def validate(root: Path) -> Result:
 
     tpl_patterns: list[re.Pattern] = []
     src_ids, counts, sources, expanded, same_file_dups = collect_testids_expanded(
-        root, globs, tpl_patterns)
-    states = index_page_states(root)
+        root, globs, tpl_patterns, lay)
+    states = index_page_states(root, lay)
     # 归属页词表：有页面表则以它为准（唯一真相源）；否则沿用「前端前缀 ∪ 分片名」（`3509 §B106`）
     attr_pages = (sorted(set(states) | {p.stem for p in cases.glob("*.md")}) if states
                   else sorted((set(src_ids) - {""}) | {p.stem for p in cases.glob("*.md")}))
@@ -646,7 +658,7 @@ def validate(root: Path) -> Result:
 
     # 分页等价（`已实现` 页 FAIL；`实现中`/`未开始` 页降 WARN 并附同形清单）
     unequal, unequal_soft = [], []
-    origin = read_origin(root)
+    origin = read_origin(root, lay)
     for page, ids in shard_ids.items():
         if page not in src_ids:
             continue  # 未实现页已按 SKIP 记录

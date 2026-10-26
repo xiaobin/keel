@@ -1,0 +1,9 @@
+# Keel 开户模板 — Atlas stack-profile（契约：atlas shared/stack-profile.md §2）
+# 开户后按项目实况修改；validate_stack_profile 是开户门。
+product: keel # 开户时由 onboard 替换为项目目录名
+origin: adopt # greenfield | adopt（旧项目接入用 adopt）
+apps:
+  - name: keel # 应用名（改成实际名字）
+    path: . # 应用根，相对项目根（路径不存在 = WARN）
+    kind: backend # frontend | backend | fullstack | mobile
+    role: legacy # landing | legacy
