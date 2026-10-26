@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, lstatSync, existsSync, writeFileSync } from 
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 // Generates application/application.json with comet-compatible content hashes.
 // Hash algorithm mirrors comet@0.5.0 applicationFilesHash + hashRuntimeValue
