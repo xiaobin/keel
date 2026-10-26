@@ -1,0 +1,3 @@
+# The files whitelist needs a directory-local ignore for generated caches.
+**/__pycache__/**
+**/*.pyc
