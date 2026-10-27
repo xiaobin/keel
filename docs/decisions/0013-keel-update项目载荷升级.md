@@ -14,7 +14,7 @@ vendor/atlas 升级只更新仓内载荷；已 onboard 项目的 `.atlas/` 停�
 
 新增 `keel-h update [--project-root <p>] [--force]`（bin/keel.mjs → scripts/update.mjs，无 change 名）：
 
-1. **只做项目侧**：刷新 `.atlas/` 到本仓 vendor/atlas，重落 MANIFEST/VERSION 并复验。keel-h 工具自身升级仍走 `npm install -g @benym/keel-h` 或源码 pull，不做 npm 自更新。
+1. **只做项目侧**：刷新 `.atlas/` 到本仓 vendor/atlas，重落 MANIFEST/VERSION 并复验。keel-h 工具自身升级仍走 `npm install -g @xiaobin268/keel-h` 或源码 pull，不做 npm 自更新。
 2. **前置**：已装配（VERSION 在），否则引导 onboard；缺 MANIFEST.json 的旧装配无法对账，默认拒绝，`--force` 可跳过对账。
 3. **有进行中 Run 拒绝**（`.comet/current-change.json` 存在，`--force` 不豁免）：更新被跟踪载荷必漂移候选指纹，无向前恢复出口（0009 §3）。
 4. **幂等**：VERSION digest 与 vendor 相同且非 force → 报已最新退出 0；`--force` 可强制重装，用于修复被改坏的载荷。

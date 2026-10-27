@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { resolveCometBin, ensureComet, runInit } from './init.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const skillSource = readFileSync(path.join(repoRoot, 'skills/keel/SKILL.md'), 'utf8');
 let failures = 0;
 const check = (name, cond, detail = '') => {
   console.log(`${cond ? 'PASS' : 'FAIL'} ${name}${cond ? '' : ' —— ' + detail}`);
@@ -92,11 +93,28 @@ const init = (root) => capture(() => runInit({ projectRoot: root, repoRoot, come
     && existsSync(path.join(p, '.atlas/VERSION'))
     && existsSync(path.join(p, '.comet/config.yaml')));
 
+  check('B1 挂载 AGENTS.md Keel 指引', (() => {
+    const text = readFileSync(path.join(p, 'AGENTS.md'), 'utf8');
+    return text.includes('<!-- KEEL:START -->') && text.includes('keel-h status <change>')
+      && text.includes('atlas.config.yaml') && text.includes('brief.md')
+      && text.includes('Shape') && text.includes('Build')
+      && text.includes('Verify/Archive') && text.includes('stack-profile');
+  })());
+
+  const skillPaths = ['.agents/skills/keel/SKILL.md', '.claude/skills/keel/SKILL.md'].map((rel) => path.join(p, rel));
+  check('B1 安装双宿主 Keel Skill', skillPaths.every((file) => existsSync(file) && readFileSync(file, 'utf8') === skillSource)
+    && skillSource.includes('name: keel') && skillSource.includes('<!-- KEEL:MANAGED -->'));
+
   // B5 幂等：重跑不重复装配
   const v1 = readFileSync(path.join(p, '.atlas/VERSION'), 'utf8');
+  const agents1 = readFileSync(path.join(p, 'AGENTS.md'), 'utf8');
+  const skills1 = skillPaths.map((file) => readFileSync(file, 'utf8'));
   const r2 = init(p);
+  const agents2 = readFileSync(path.join(p, 'AGENTS.md'), 'utf8');
   check('B5 幂等重跑', r2.rc === 0 && r2.out.includes('跳过载荷复制')
-    && readFileSync(path.join(p, '.atlas/VERSION'), 'utf8') === v1, r2.out);
+    && readFileSync(path.join(p, '.atlas/VERSION'), 'utf8') === v1
+    && agents2 === agents1 && agents2.split('<!-- KEEL:START -->').length === 2
+    && skillPaths.every((file, i) => readFileSync(file, 'utf8') === skills1[i]), r2.out);
 }
 
 // B2 标准位复用
@@ -106,10 +124,16 @@ const init = (root) => capture(() => runInit({ projectRoot: root, repoRoot, come
   put(path.join(p, 'product/e2e/cases/c1.md'), '# 既有用例\n');
   const profile = 'product: custom\norigin: adopt\napps:\n  - name: app\n    path: .\n    kind: backend\n    role: legacy\n';
   put(path.join(p, 'product/stack-profile.yaml'), profile);
+  const agents = '# 项目规则\n\n保留我。\n';
+  put(path.join(p, 'AGENTS.md'), agents);
   const { rc, out } = init(p);
   check('B2 标准位 exit 0', rc === 0, out);
   check('B2 既有 stack-profile 不动', readFileSync(path.join(p, 'product/stack-profile.yaml'), 'utf8') === profile);
   check('B2 既有 PRD 不动', readFileSync(path.join(p, 'product/prd/prd.md'), 'utf8') === '# 既有 PRD 标记\n');
+  check('B2 保留既有 AGENTS.md 并追加 Keel 区块', (() => {
+    const text = readFileSync(path.join(p, 'AGENTS.md'), 'utf8');
+    return text.startsWith(agents) && text.includes('<!-- KEEL:START -->');
+  })());
   check('B2 不写 atlas.config.yaml', !existsSync(path.join(p, 'atlas.config.yaml')));
   check('B2 报告原位复用', out.includes('原位复用'), out);
 }
@@ -157,6 +181,28 @@ const init = (root) => capture(() => runInit({ projectRoot: root, repoRoot, come
   const { rc, out } = capture(() => runInit({ projectRoot: p, repoRoot, comet: 'comet-for-probe',
     pythonCheck: () => ({ ok: true, hasPytest: false }) }));
   check('B7 pytest 缺失仅 WARN', rc === 0 && out.includes('WARN') && out.includes('pytest'), out);
+}
+
+// B8 KEEL 标记异常 → 拒绝且不改 AGENTS.md
+{
+  const p = tmp('keel-init-m-'); gitInit(p);
+  const broken = '# 项目规则\n\n<!-- KEEL:START -->\n缺结束标记\n';
+  put(path.join(p, 'AGENTS.md'), broken);
+  const { rc, out } = init(p);
+  check('B8 异常标记拒绝且原文件不动', rc === 1 && out.includes('KEEL 标记')
+    && readFileSync(path.join(p, 'AGENTS.md'), 'utf8') === broken, out);
+}
+
+// B9 任一宿主已有非托管同名 Skill → 两个宿主都不写，原文件保留
+for (const rel of ['.agents/skills/keel/SKILL.md', '.claude/skills/keel/SKILL.md']) {
+  const p = tmp('keel-init-u-'); gitInit(p);
+  const target = path.join(p, rel);
+  const original = '# 用户自有 Keel Skill\n';
+  put(target, original);
+  const other = path.join(p, rel.startsWith('.agents/') ? '.claude/skills/keel/SKILL.md' : '.agents/skills/keel/SKILL.md');
+  const { rc, out } = init(p);
+  check(`B9 ${rel} 非托管 Skill 拒绝覆盖`, rc === 1 && out.includes('拒绝覆盖')
+    && readFileSync(target, 'utf8') === original && !existsSync(other), out);
 }
 
 if (failures > 0) { console.error(`INIT SELFTEST FAIL（${failures} 项）`); process.exit(1); }

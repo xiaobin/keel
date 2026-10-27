@@ -450,7 +450,7 @@ const commands = {
 if (!cmd || cmd === 'help' || cmd === '--help') {
   console.log(`keel — Keel 工作流命令（Comet Native × Atlas 治理）
 
-  keel-h init [--yes]     项目接入：comet 运行时检测（缺失可确认安装）+ 装配 .atlas + 挂接既有应然资产（不创建 change）
+  keel-h init [--yes]     项目接入：comet 运行时检测 + 装配 .atlas + 挂接应然资产 + 安装 Keel Skill/AGENTS 指引（不创建 change）
   keel-h onboard <change> [--yes]   开户：init + brief + start-request
   keel-h start <change>     启动 Run
   keel-h status <change>    查看 Run 状态与待办

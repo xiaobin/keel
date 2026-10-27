@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 // keel update: refresh an installed project's assembled .atlas/ payload to this
 // repo's vendor/atlas (design: docs/decisions/0013). Project-side only (like
 // `comet update --project-only`); the keel npm package itself is still upgraded
-// via `npm install -g @benym/keel-h`. Never touches product/ or change assets.
+// via `npm install -g @xiaobin268/keel-h`. Never touches product/ or change assets.
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 

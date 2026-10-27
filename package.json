@@ -1,5 +1,5 @@
 {
-  "name": "@benym/keel-h",
+  "name": "@xiaobin268/keel-h",
   "version": "0.1.0",
   "dependencies": {
     "@rpamis/comet": "^0.5.0"
@@ -17,7 +17,7 @@
   "type": "module",
   "bin": { "keel-h": "bin/keel.mjs" },
   "publishConfig": { "access": "public" },
-  "files": ["bin", "application", "scripts", "vendor", "assets", "docs/安装使用手册.md", "README.md"],
+  "files": ["bin", "application", "scripts", "vendor", "assets", "skills", "docs/安装使用手册.md", "README.md"],
   "engines": {
     "node": ">=22.16"
   }

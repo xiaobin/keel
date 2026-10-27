@@ -74,6 +74,69 @@ export async function ensureComet({ repoRoot, assumeYes = false, env = process.e
   return resolveCometBin({ repoRoot, env, exists }); // null when install did not land it
 }
 
+const KEEL_SKILL_MARKER = '<!-- KEEL:MANAGED -->';
+const KEEL_SKILL_TARGETS = ['.agents/skills/keel/SKILL.md', '.claude/skills/keel/SKILL.md'];
+
+function mountKeelSkill(projectRoot, repoRoot) {
+  const source = path.join(repoRoot, 'skills/keel/SKILL.md');
+  if (!existsSync(source)) throw new Error(`keel 技能载荷缺失：${source}（仓库不完整）。`);
+  const content = readFileSync(source, 'utf8');
+  const targets = KEEL_SKILL_TARGETS.map((rel) => path.join(projectRoot, rel));
+  // Preflight every host before writing either one: user-owned skills win.
+  for (const target of targets) {
+    if (existsSync(target) && !readFileSync(target, 'utf8').includes(KEEL_SKILL_MARKER)) {
+      throw new Error(`已有 Keel Skill 非 keel-h 托管，拒绝覆盖：${target}；请人工合并或移走后重跑 init。`);
+    }
+  }
+  let changed = false;
+  for (const target of targets) {
+    if (existsSync(target) && readFileSync(target, 'utf8') === content) continue;
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, content);
+    changed = true;
+  }
+  return changed ? 'mounted' : 'current';
+}
+
+const KEEL_AGENT_START = '<!-- KEEL:START -->';
+const KEEL_AGENT_END = '<!-- KEEL:END -->';
+const KEEL_AGENT_BLOCK = [
+  KEEL_AGENT_START,
+  '## Keel 工作流',
+  '',
+  '本项目使用 Keel 管理需求变更；通过 `keel-h` 操作，不直接调用 Comet，也不手改 `.comet/` 运行态。',
+  '',
+  '- 新变更：`keel-h onboard <change>`，补全 brief 并提交后，再 `keel-h start <change>`。',
+  '- 已有变更：先 `keel-h status <change>`，再按 CLI 提示推进；完整命令见 `keel-h --help`。',
+  '- 资产发现：先读 `atlas.config.yaml`（存在时）确定资产根，缺省为 `product/`；再读 `docs/comet/changes/<change>/brief.md`，不得凭路径猜测。',
+  '- 按阶段读取：Shape 读取既有 PRD/E2E/stack-profile；Build 按变更范围读取相关 PRD 验收条项、E2E 用例和 stack-profile；Verify/Archive 复核相同验收资产及审查、验证和走查留痕。资产只在原路径读取，不复制进本文件。',
+  '- 遵守 Shape→Build→Verify→Archive、Builder/Verifier 身份分离和用户确认；不得删除或弱化治理校验。',
+  '- 开工前保持 Git 工作区干净；Run 期间不要手改被跟踪文件，以免候选指纹漂移。',
+  KEEL_AGENT_END,
+].join('\n');
+
+function mountKeelAgent(projectRoot) {
+  const file = path.join(projectRoot, 'AGENTS.md');
+  const current = existsSync(file) ? readFileSync(file, 'utf8') : '';
+  const starts = current.split(KEEL_AGENT_START).length - 1;
+  const ends = current.split(KEEL_AGENT_END).length - 1;
+  if (starts === 0 && ends === 0) {
+    let separator = '';
+    if (current) separator = current.endsWith('\n') ? '\n' : '\n\n';
+    writeFileSync(file, current + separator + KEEL_AGENT_BLOCK + '\n');
+    return 'mounted';
+  }
+  const start = current.indexOf(KEEL_AGENT_START);
+  const end = current.indexOf(KEEL_AGENT_END);
+  if (starts !== 1 || ends !== 1 || end < start) {
+    throw new Error('AGENTS.md 的 KEEL 标记缺失、重复或顺序错误；请修复后重跑 init。');
+  }
+  const next = current.slice(0, start) + KEEL_AGENT_BLOCK + current.slice(end + KEEL_AGENT_END.length);
+  if (next === current) return 'current';
+  writeFileSync(file, next);
+  return 'mounted';
+}
+
 const hasMd = (dir) => {
   try { return readdirSync(dir).some((f) => f.endsWith('.md')); } catch { return false; }
 };
@@ -230,6 +293,21 @@ export function runInit({ projectRoot, repoRoot, comet = null, pythonCheck = che
   process.stderr.write(gate.stderr || '');
   if (gate.error || gate.status !== 0) {
     console.error('开户门 validate_stack_profile 未过；门不过不接入。');
+    return 1;
+  }
+
+  // 8. Mount the thin Keel skill and agent guidance, not upstream wiring.
+  try {
+    const skill = mountKeelSkill(projectRoot, repoRoot);
+    console.log(skill === 'current'
+      ? 'Keel Skill 已是最新（.agents/skills/keel 与 .claude/skills/keel）。'
+      : '已挂载/更新 Keel Skill（.agents/skills/keel 与 .claude/skills/keel）。');
+    const mounted = mountKeelAgent(projectRoot);
+    console.log(mounted === 'current'
+      ? 'AGENTS.md 的 Keel 指引已是最新。'
+      : '已挂载 AGENTS.md 的 Keel 指引（KEEL 区块，区块外内容保留）。');
+  } catch (error) {
+    console.error(error.message);
     return 1;
   }
   return 0;

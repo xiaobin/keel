@@ -24,3 +24,16 @@
 - 产出文档用中文；代码注释用英文。
 - 新决策一律追加 `docs/decisions/NNNN-*.md`，不覆盖旧 ADR。
 - 完成任务后汇报：产出了什么文件、发现 comet 缺什么能力、下一个建议任务。
+
+<!-- KEEL:START -->
+## Keel 工作流
+
+本项目使用 Keel 管理需求变更；通过 `keel-h` 操作，不直接调用 Comet，也不手改 `.comet/` 运行态。
+
+- 新变更：`keel-h onboard <change>`，补全 brief 并提交后，再 `keel-h start <change>`。
+- 已有变更：先 `keel-h status <change>`，再按 CLI 提示推进；完整命令见 `keel-h --help`。
+- 资产发现：先读 `atlas.config.yaml`（存在时）确定资产根，缺省为 `product/`；再读 `docs/comet/changes/<change>/brief.md`，不得凭路径猜测。
+- 按阶段读取：Shape 读取既有 PRD/E2E/stack-profile；Build 按变更范围读取相关 PRD 验收条项、E2E 用例和 stack-profile；Verify/Archive 复核相同验收资产及审查、验证和走查留痕。资产只在原路径读取，不复制进本文件。
+- 遵守 Shape→Build→Verify→Archive、Builder/Verifier 身份分离和用户确认；不得删除或弱化治理校验。
+- 开工前保持 Git 工作区干净；Run 期间不要手改被跟踪文件，以免候选指纹漂移。
+<!-- KEEL:END -->
